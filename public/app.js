@@ -25,6 +25,16 @@
   const previewContent = document.getElementById('preview-content');
   const previewClose = document.getElementById('preview-close');
 
+  // ===== Toast =====
+  function showToast(text, type = 'success') {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = text;
+    container.appendChild(toast);
+    setTimeout(() => toast.remove(), 3000);
+  }
+
   // ===== Auth Tabs =====
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
@@ -75,6 +85,7 @@
       userName = data.user.name;
       localStorage.setItem('token', token);
       localStorage.setItem('userName', userName);
+      showToast(`欢迎回来，${userName}`, 'success');
       enterFileManager();
     } catch (err) {
       showMessage('网络错误', 'error');
@@ -108,6 +119,7 @@
         return;
       }
       showMessage('注册成功，请登录', 'success');
+      showToast('注册成功，请登录', 'success');
       // Switch to login tab
       document.querySelector('[data-tab="login"]').click();
     } catch (err) {
@@ -181,57 +193,132 @@
     `).join('');
   }
 
+  // ===== MD5 Calculation (SparkMD5) =====
+  async function calculateFileMD5(file) {
+    return new Promise((resolve, reject) => {
+      const chunkSize = 2 * 1024 * 1024; // 2MB per chunk
+      const spark = new SparkMD5.ArrayBuffer();
+      const reader = new FileReader();
+      let offset = 0;
+
+      reader.onload = (e) => {
+        spark.append(e.target.result);
+        offset += chunkSize;
+        if (offset < file.size) {
+          readNext();
+        } else {
+          resolve(spark.end());
+        }
+      };
+
+      reader.onerror = () => reject(reader.error);
+
+      function readNext() {
+        const slice = file.slice(offset, offset + chunkSize);
+        reader.readAsArrayBuffer(slice);
+      }
+
+      readNext();
+    });
+  }
+
   // ===== Upload =====
   fileInput.addEventListener('change', async () => {
-    const files = fileInput.files;
+    const files = Array.from(fileInput.files);
     if (!files.length) return;
 
     uploadOverlay.classList.remove('hidden');
     progressFill.style.width = '0%';
-    uploadStatus.textContent = `正在上传 ${files.length} 个文件...`;
-
-    const formData = new FormData();
-    for (const f of files) {
-      formData.append('files', f);
-    }
+    uploadStatus.textContent = `正在计算文件指纹...`;
 
     try {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', `${API}/files/upload`);
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      // Step 1: 计算所有文件的 MD5
+      const fileInfos = [];
+      for (let i = 0; i < files.length; i++) {
+        uploadStatus.textContent = `正在计算指纹 (${i + 1}/${files.length})...`;
+        progressFill.style.width = Math.round(((i + 1) / files.length) * 30) + '%';
+        const md5 = await calculateFileMD5(files[i]);
+        fileInfos.push({ file: files[i], md5, originalName: files[i].name });
+      }
 
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const pct = Math.round((e.loaded / e.total) * 100);
-          progressFill.style.width = pct + '%';
-          uploadStatus.textContent = `上传中... ${pct}%`;
+      // Step 2: 调用秒传接口，尝试对所有文件秒传
+      uploadStatus.textContent = '正在检查重复文件...';
+      progressFill.style.width = '35%';
+
+      const instantRes = await fetch(`${API}/files/instant`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          files: fileInfos.map(f => ({ md5: f.md5, originalName: f.originalName })),
+        }),
+      });
+
+      if (instantRes.status === 401) { logout(); return; }
+      const instantData = await instantRes.json();
+
+      // 秒传失败的（md5 不存在于服务器）需要真正上传
+      const failedMd5Set = new Set(
+        (instantData.results || []).filter(r => !r.success).map(r => r.md5)
+      );
+      const toUpload = fileInfos.filter(f => failedMd5Set.has(f.md5));
+
+      // Step 3: 真实上传不存在的文件
+      if (toUpload.length) {
+        uploadStatus.textContent = `正在上传 ${toUpload.length} 个新文件...`;
+        progressFill.style.width = '40%';
+
+        const formData = new FormData();
+        for (const f of toUpload) {
+          formData.append('files', f.file);
         }
-      };
 
-      xhr.onload = () => {
-        uploadOverlay.classList.add('hidden');
-        fileInput.value = '';
-        if (xhr.status === 200) {
-          loadFiles();
-        } else if (xhr.status === 401) {
-          logout();
-        } else {
-          const data = JSON.parse(xhr.responseText);
-          alert(data.message || '上传失败');
-        }
-      };
+        await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', `${API}/files/upload`);
+          xhr.setRequestHeader('Authorization', `Bearer ${token}`);
 
-      xhr.onerror = () => {
-        uploadOverlay.classList.add('hidden');
-        fileInput.value = '';
-        alert('网络错误');
-      };
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              const pct = Math.round(40 + (e.loaded / e.total) * 60);
+              progressFill.style.width = pct + '%';
+              uploadStatus.textContent = `上传中... ${Math.round((e.loaded / e.total) * 100)}%`;
+            }
+          };
 
-      xhr.send(formData);
+          xhr.onload = () => {
+            if (xhr.status === 200) {
+              resolve();
+            } else if (xhr.status === 401) {
+              logout();
+              reject(new Error('unauthorized'));
+            } else {
+              const data = JSON.parse(xhr.responseText);
+              reject(new Error(data.message || '上传失败'));
+            }
+          };
+
+          xhr.onerror = () => reject(new Error('网络错误'));
+          xhr.send(formData);
+        });
+      } else {
+        progressFill.style.width = '100%';
+        uploadStatus.textContent = '全部秒传完成';
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      uploadOverlay.classList.add('hidden');
+      fileInput.value = '';
+      showToast(`上传完成，共 ${files.length} 个文件`, 'success');
+      loadFiles();
     } catch (err) {
       uploadOverlay.classList.add('hidden');
       fileInput.value = '';
-      alert('上传失败');
+      if (err.message !== 'unauthorized') {
+        alert(err.message || '上传失败');
+      }
     }
   });
 

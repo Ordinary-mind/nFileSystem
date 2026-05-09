@@ -301,6 +301,24 @@ app.post('/files/instant', authRequired, async (req, res) => {
         continue;
       }
 
+      // 同一用户、同一 md5、同一原始文件名视为重复，不再插入
+      const duplicate = await get(
+        'SELECT id FROM files WHERE user_id = ? AND md5 = ? AND original_name = ?',
+        [req.user.id, md5, originalName]
+      );
+
+      if (duplicate) {
+        results.push({
+          md5,
+          originalName,
+          success: true,
+          id: duplicate.id,
+          size: existing.size,
+          duplicate: true,
+        });
+        continue;
+      }
+
       const result = await run(
         `INSERT INTO files(user_id, original_name, stored_name, md5, size, mime_type)
          VALUES (?, ?, ?, ?, ?, ?)`,
