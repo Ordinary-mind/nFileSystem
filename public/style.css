@@ -150,13 +150,25 @@ body {
   border: 1px solid #ddd;
   border-radius: 6px;
   font-size: 13px;
-  width: 200px;
+  width: 180px;
 }
 
 .search-input:focus {
   outline: none;
   border-color: #667eea;
 }
+
+.btn-toolbar {
+  padding: 8px 14px;
+  background: #f0f2f5;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-toolbar:hover { border-color: #667eea; color: #667eea; }
 
 .upload-btn {
   padding: 8px 16px;
@@ -181,6 +193,33 @@ body {
 }
 
 .btn-logout:hover { border-color: #e74c3c; color: #e74c3c; }
+
+/* ===== Breadcrumb ===== */
+.breadcrumb {
+  padding: 10px 24px;
+  background: #fafafa;
+  border-bottom: 1px solid #eee;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.breadcrumb-item {
+  cursor: pointer;
+  color: #667eea;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+
+.breadcrumb-item:hover { background: #e8ecff; }
+
+.breadcrumb-sep {
+  color: #ccc;
+  user-select: none;
+}
 
 /* ===== File List ===== */
 .file-header {
@@ -211,12 +250,13 @@ body {
 }
 
 .file-item:hover { background: #f5f7ff; }
+.file-item.folder { cursor: pointer; }
 
 .col-name { flex: 3; display: flex; align-items: center; gap: 10px; overflow: hidden; }
 .col-size { flex: 1; font-size: 13px; color: #666; }
 .col-type { flex: 1; font-size: 13px; color: #666; }
 .col-date { flex: 1.5; font-size: 13px; color: #666; }
-.col-action { flex: 1; display: flex; gap: 8px; }
+.col-action { flex: 1.2; display: flex; gap: 6px; }
 
 .file-icon {
   font-size: 24px;
@@ -242,6 +282,7 @@ body {
 
 .btn-action:hover { border-color: #667eea; color: #667eea; }
 .btn-action.download:hover { border-color: #27ae60; color: #27ae60; }
+.btn-action.danger:hover { border-color: #e74c3c; color: #e74c3c; }
 
 .empty-state {
   text-align: center;
@@ -360,6 +401,27 @@ body {
   padding: 40px;
   color: #999;
 }
+
+/* ===== Context Menu ===== */
+.context-menu {
+  position: fixed;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  z-index: 2000;
+  min-width: 140px;
+  padding: 4px 0;
+}
+
+.menu-item {
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.menu-item:hover { background: #f5f7ff; }
 
 /* ===== Toast ===== */
 .toast-container {

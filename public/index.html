@@ -38,18 +38,25 @@
         <span id="user-info" class="user-info"></span>
       </div>
       <div class="toolbar-right">
-        <input type="text" id="search-input" placeholder="搜索文件..." class="search-input">
+        <input type="text" id="search-input" placeholder="搜索..." class="search-input">
+        <button id="new-folder-btn" class="btn-toolbar">📂 新建文件夹</button>
         <label class="upload-btn" for="file-input">⬆ 上传文件</label>
         <input type="file" id="file-input" multiple hidden>
         <button id="logout-btn" class="btn-logout">退出</button>
       </div>
     </header>
 
+    <!-- 面包屑导航 -->
+    <div class="breadcrumb" id="breadcrumb">
+      <span class="breadcrumb-item" data-id="">🏠 根目录</span>
+    </div>
+
+    <!-- 文件列表头 -->
     <div class="file-header">
       <div class="col-name">名称</div>
       <div class="col-size">大小</div>
       <div class="col-type">类型</div>
-      <div class="col-date">上传时间</div>
+      <div class="col-date">时间</div>
       <div class="col-action">操作</div>
     </div>
 
@@ -73,6 +80,13 @@
         </div>
         <div id="preview-content" class="preview-content"></div>
       </div>
+    </div>
+
+    <!-- 右键菜单 -->
+    <div id="context-menu" class="context-menu hidden">
+      <div class="menu-item" data-action="rename">✏️ 重命名</div>
+      <div class="menu-item" data-action="move">📦 移动到...</div>
+      <div class="menu-item" data-action="delete">🗑️ 删除</div>
     </div>
   </div>
 

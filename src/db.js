@@ -50,6 +50,7 @@ function all(sql, params = []) {
  * 初始化数据库表
  */
 async function initDb() {
+  // 用户表
   await run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,30 +60,49 @@ async function initDb() {
     )
   `);
 
+  // 文件物理存储表（纯 MD5 去重）
   await run(`
     CREATE TABLE IF NOT EXISTS files (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      original_name TEXT NOT NULL,
       stored_name TEXT NOT NULL,
-      md5 TEXT NOT NULL,
+      md5 TEXT NOT NULL UNIQUE,
       size INTEGER NOT NULL,
       mime_type TEXT,
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
+  // 用户文件夹表
+  await run(`
+    CREATE TABLE IF NOT EXISTS user_folders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      parent_id INTEGER DEFAULT NULL,
+      name TEXT NOT NULL,
       created_at TEXT DEFAULT (datetime('now', 'localtime')),
-      FOREIGN KEY (user_id) REFERENCES users(id)
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (parent_id) REFERENCES user_folders(id)
+    )
+  `);
+
+  // 用户文件引用表
+  await run(`
+    CREATE TABLE IF NOT EXISTS user_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      folder_id INTEGER DEFAULT NULL,
+      file_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now', 'localtime')),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (folder_id) REFERENCES user_folders(id),
+      FOREIGN KEY (file_id) REFERENCES files(id)
     )
   `);
 
   await run('CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5)');
-
-  // 自动迁移：如果 files 表存在 relative_path 列则删除
-  const columns = await all("PRAGMA table_info(files)");
-  const hasRelativePath = columns.some((col) => col.name === 'relative_path');
-  if (hasRelativePath) {
-    await run('ALTER TABLE files DROP COLUMN relative_path');
-    // eslint-disable-next-line no-console
-    console.log('[迁移] 已删除 files.relative_path 列');
-  }
+  await run('CREATE INDEX IF NOT EXISTS idx_user_folders_user ON user_folders(user_id, parent_id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_user_files_user ON user_files(user_id, folder_id)');
 }
 
 module.exports = {
