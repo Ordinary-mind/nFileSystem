@@ -221,6 +221,19 @@ app.post('/files/upload', authRequired, (req, res, next) => {
 });
 
 /**
+ * 校验文件名是否合法
+ */
+function isValidFileName(name) {
+  if (!name || typeof name !== 'string') return false;
+  if (name.length > 255) return false;
+  // 禁止路径分隔符和特殊控制字符
+  if (/[/\\<>:"|?*\x00-\x1f]/.test(name)) return false;
+  // 禁止 . 和 .. 作为文件名
+  if (name === '.' || name === '..') return false;
+  return true;
+}
+
+/**
  * 批量秒传确认（需要鉴权）
  * POST /files/instant
  * Body: { files: [{ md5: "abc123...", originalName: "report.pdf" }, ...] }
@@ -242,6 +255,11 @@ app.post('/files/instant', authRequired, async (req, res) => {
       const { md5, originalName } = item;
       if (!md5 || !originalName) {
         results.push({ md5, originalName, success: false, message: 'md5 和 originalName 必填' });
+        continue;
+      }
+
+      if (!isValidFileName(originalName)) {
+        results.push({ md5, originalName, success: false, message: '文件名不合法' });
         continue;
       }
 

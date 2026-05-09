@@ -1,6 +1,6 @@
 # 文件管理系统（Node.js + Express + Multer + SQLite）
 
-一个简洁的文件管理后端示例，支持：
+一个简洁的nodejs文件管理后端，支持：
 
 - 用户注册、登录（JWT 鉴权）
 - 未登录上传时返回 `401`
@@ -126,10 +126,10 @@ npm start
 
 ## 4.5 文件下载（需要鉴权）
 
-`GET /files/:id/download`
+`GET /files/:md5/download`
 
 - Header: `Authorization: Bearer <JWT_TOKEN>`
-- 仅可下载当前登录用户自己上传的文件
+- 知道md5就可以下载
 
 ---
 

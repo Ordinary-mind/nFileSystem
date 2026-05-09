@@ -1,5 +1,5 @@
 {
-  "name": "file-management-system",
+  "name": "n-file-system",
   "version": "1.0.0",
   "description": "基于 Node.js + Express + Multer + SQLite 的文件管理系统",
   "main": "src/app.js",

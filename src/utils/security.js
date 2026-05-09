@@ -29,7 +29,7 @@ async function comparePassword(password, hash) {
  * 优先使用 TOKEN_EXPIRES_IN 环境变量，否则开发环境 7 天，生产环境 2 小时
  */
 function signToken(payload) {
-  const expiresIn = process.env.TOKEN_EXPIRES_IN || '2h';
+  const expiresIn = process.env.TOKEN_EXPIRES_IN || (process.env.NODE_ENV === 'production' ? '2h' : '7d');
   return jwt.sign(payload, JWT_SECRET, { expiresIn });
 }
 
