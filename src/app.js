@@ -24,6 +24,7 @@ if (!fs.existsSync(tempRoot)) {
 }
 
 app.use(express.json());
+app.set('trust proxy', true);
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const uploader = multer({
@@ -88,6 +89,37 @@ function getFilePath(md5, storedName) {
   return path.join(uploadRoot, md5.slice(0, 2), md5.slice(2, 4), storedName);
 }
 
+/**
+ * 获取客户端真实 IP（考虑反向代理）
+ */
+function getClientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (forwarded) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.headers['x-real-ip'] || req.connection.remoteAddress || req.ip;
+}
+
+/**
+ * 记录操作日志
+ * @param {object} options
+ * @param {number|null} options.userId - 操作用户 ID（未登录时为 null）
+ * @param {string} options.action - 操作类型：register, login, login_failed, upload, download, delete, rename, move, share, password_change 等
+ * @param {string|null} options.targetType - 目标类型：user, file, folder 等
+ * @param {number|null} options.targetId - 目标 ID
+ * @param {string|null} options.detail - 额外描述（JSON 字符串或文本）
+ * @param {object} req - Express request 对象
+ */
+function addLog({ userId = null, action, targetType = null, targetId = null, detail = null }, req) {
+  const ip = getClientIp(req);
+  const userAgent = req.headers['user-agent'] || '';
+  // 异步写入，不阻塞响应
+  run(
+    'INSERT INTO logs(user_id, action, target_type, target_id, detail, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [userId, action, targetType, targetId, detail, ip, userAgent]
+  ).catch(() => { /* 日志写入失败不影响业务 */ });
+}
+
 // ===== 认证接口 =====
 
 app.get('/auth/register-status', (_req, res) => {
@@ -105,10 +137,12 @@ app.post('/auth/register', async (req, res) => {
       return res.status(400).json({ message: 'name 和 password 必填' });
     }
     const hashed = await hashPassword(password);
-    await run('INSERT INTO users(name, password) VALUES (?, ?)', [name, hashed]);
+    const result = await run('INSERT INTO users(name, password) VALUES (?, ?)', [name, hashed]);
+    addLog({ userId: result.lastID, action: 'register', targetType: 'user', targetId: result.lastID, detail: JSON.stringify({ name }) }, req);
     return res.json({ message: '注册成功' });
   } catch (err) {
     if (String(err.message).includes('UNIQUE')) {
+      addLog({ userId: null, action: 'register_failed', detail: JSON.stringify({ name: req.body.name, reason: '用户名已存在' }) }, req);
       return res.status(409).json({ message: '用户名已存在' });
     }
     return res.status(500).json({ message: '注册失败', error: err.message });
@@ -123,13 +157,16 @@ app.post('/auth/login', async (req, res) => {
     }
     const user = await get('SELECT id, name, password FROM users WHERE name = ?', [name]);
     if (!user) {
+      addLog({ userId: null, action: 'login_failed', detail: JSON.stringify({ name, reason: '用户不存在' }) }, req);
       return res.status(401).json({ message: '用户名或密码错误' });
     }
     const match = await comparePassword(password, user.password);
     if (!match) {
+      addLog({ userId: user.id, action: 'login_failed', targetType: 'user', targetId: user.id, detail: JSON.stringify({ name, reason: '密码错误' }) }, req);
       return res.status(401).json({ message: '用户名或密码错误' });
     }
     const token = signToken({ id: user.id, name: user.name });
+    addLog({ userId: user.id, action: 'login', targetType: 'user', targetId: user.id }, req);
     return res.json({ message: '登录成功', token, user: { id: user.id, name: user.name } });
   } catch (err) {
     return res.status(500).json({ message: '登录失败', error: err.message });
