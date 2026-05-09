@@ -65,7 +65,6 @@ async function initDb() {
       user_id INTEGER NOT NULL,
       original_name TEXT NOT NULL,
       stored_name TEXT NOT NULL,
-      relative_path TEXT NOT NULL,
       md5 TEXT NOT NULL,
       size INTEGER NOT NULL,
       mime_type TEXT,
@@ -73,6 +72,17 @@ async function initDb() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     )
   `);
+
+  await run('CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5)');
+
+  // 自动迁移：如果 files 表存在 relative_path 列则删除
+  const columns = await all("PRAGMA table_info(files)");
+  const hasRelativePath = columns.some((col) => col.name === 'relative_path');
+  if (hasRelativePath) {
+    await run('ALTER TABLE files DROP COLUMN relative_path');
+    // eslint-disable-next-line no-console
+    console.log('[迁移] 已删除 files.relative_path 列');
+  }
 }
 
 module.exports = {

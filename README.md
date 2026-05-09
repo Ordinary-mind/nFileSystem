@@ -67,7 +67,6 @@ npm start
 - `user_id`：上传用户 ID
 - `original_name`：原始文件名
 - `stored_name`：落盘文件名（md5+扩展名）
-- `relative_path`：相对路径（如 `ab/cd/xxxxxxxx.png`）
 - `md5`：文件内容 MD5
 - `size`：文件大小（字节）
 - `mime_type`：MIME 类型
@@ -148,12 +147,3 @@ npm start
 - 相对路径：`a1/b2/a1b2c3d4e5f6....pdf`
 
 ---
-
-## 6. 安全提示（生产环境）
-
-当前示例偏教学用途，生产请至少做以下增强：
-
-1. 密码哈希改为 `bcrypt/argon2`
-2. 设置强随机 `JWT_SECRET`
-3. 增加上传文件类型白名单、病毒扫描、限流等
-4. 增加日志审计与错误监控
