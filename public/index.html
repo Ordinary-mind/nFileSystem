@@ -57,7 +57,6 @@
       <div class="col-size">大小</div>
       <div class="col-type">类型</div>
       <div class="col-date">时间</div>
-      <div class="col-action">操作</div>
     </div>
 
     <div id="file-list" class="file-list"></div>
@@ -83,10 +82,21 @@
     </div>
 
     <!-- 右键菜单 -->
-    <div id="context-menu" class="context-menu hidden">
-      <div class="menu-item" data-action="rename">✏️ 重命名</div>
-      <div class="menu-item" data-action="move">📦 移动到...</div>
-      <div class="menu-item" data-action="delete">🗑️ 删除</div>
+    <div id="context-menu" class="context-menu hidden"></div>
+
+    <!-- 移动目标选择弹窗 -->
+    <div id="move-overlay" class="move-overlay hidden">
+      <div class="move-dialog">
+        <div class="move-header">
+          <span>移动到...</span>
+          <button id="move-close" class="preview-close">✕</button>
+        </div>
+        <div class="move-breadcrumb" id="move-breadcrumb"></div>
+        <div class="move-list" id="move-list"></div>
+        <div class="move-footer">
+          <button id="move-confirm" class="btn-move-confirm">移动到此处</button>
+        </div>
+      </div>
     </div>
   </div>
 

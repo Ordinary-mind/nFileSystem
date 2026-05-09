@@ -4,7 +4,7 @@
   const API = '';
   let token = localStorage.getItem('token') || '';
   let userName = localStorage.getItem('userName') || '';
-  let currentFolderId = null; // null = 根目录
+  let currentFolderId = null;
 
   // DOM refs
   const authPage = document.getElementById('auth-page');
@@ -28,6 +28,11 @@
   const previewContent = document.getElementById('preview-content');
   const previewClose = document.getElementById('preview-close');
   const contextMenu = document.getElementById('context-menu');
+  const moveOverlay = document.getElementById('move-overlay');
+  const moveList = document.getElementById('move-list');
+  const moveBreadcrumb = document.getElementById('move-breadcrumb');
+  const moveClose = document.getElementById('move-close');
+  const moveConfirm = document.getElementById('move-confirm');
 
   // ===== Toast =====
   function showToast(text, type = 'success') {
@@ -177,16 +182,15 @@
 
   function renderDrive(folders, files) {
     if (!folders.length && !files.length) {
-      fileList.innerHTML = '<div class="empty-state"><div class="icon">📂</div>空文件夹，上传文件或新建文件夹</div>';
+      fileList.innerHTML = '<div class="empty-state"><div class="icon">📂</div>空文件夹，右键可新建文件夹</div>';
       return;
     }
 
     let html = '';
 
-    // 文件夹
     for (const f of folders) {
       html += `
-        <div class="file-item folder" data-type="folder" data-id="${f.id}" ondblclick="window._openFolder(${f.id})">
+        <div class="file-item folder" data-type="folder" data-id="${f.id}" data-name="${escapeAttr(f.name)}">
           <div class="col-name">
             <span class="file-icon">📁</span>
             <span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
@@ -194,17 +198,12 @@
           <div class="col-size">-</div>
           <div class="col-type">文件夹</div>
           <div class="col-date">${f.created_at || '-'}</div>
-          <div class="col-action">
-            <button class="btn-action" onclick="window._renameFolder(${f.id}, '${escapeAttr(f.name)}')">重命名</button>
-            <button class="btn-action danger" onclick="window._deleteFolder(${f.id})">删除</button>
-          </div>
         </div>`;
     }
 
-    // 文件
     for (const f of files) {
       html += `
-        <div class="file-item" data-type="file" data-id="${f.id}">
+        <div class="file-item" data-type="file" data-id="${f.id}" data-name="${escapeAttr(f.name)}" data-md5="${f.md5}">
           <div class="col-name">
             <span class="file-icon">${getFileIcon(f.name)}</span>
             <span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
@@ -212,29 +211,140 @@
           <div class="col-size">${formatSize(f.size)}</div>
           <div class="col-type">${getExtension(f.name)}</div>
           <div class="col-date">${f.created_at || '-'}</div>
-          <div class="col-action">
-            <button class="btn-action" onclick="window._previewFile('${f.md5}', '${escapeAttr(f.name)}')">查看</button>
-            <button class="btn-action download" onclick="window._downloadFile('${f.md5}', '${escapeAttr(f.name)}')">下载</button>
-            <button class="btn-action" onclick="window._renameFile(${f.id}, '${escapeAttr(f.name)}')">重命名</button>
-            <button class="btn-action danger" onclick="window._deleteFile(${f.id})">删除</button>
-          </div>
         </div>`;
     }
 
     fileList.innerHTML = html;
+
+    // 双击文件夹进入
+    fileList.querySelectorAll('.file-item.folder').forEach(el => {
+      el.addEventListener('dblclick', () => {
+        currentFolderId = el.dataset.id;
+        searchInput.value = '';
+        loadDrive();
+      });
+    });
+
+    // 双击文件预览
+    fileList.querySelectorAll('.file-item[data-type="file"]').forEach(el => {
+      el.addEventListener('dblclick', () => {
+        previewFile(el.dataset.md5, el.dataset.name);
+      });
+    });
   }
 
-  // ===== Folder Operations =====
-  window._openFolder = function(id) {
-    currentFolderId = id;
-    searchInput.value = '';
-    loadDrive();
-  };
+  // ===== Context Menu =====
+  let contextTarget = null;
 
-  newFolderBtn.addEventListener('click', async () => {
+  fileList.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const item = e.target.closest('.file-item');
+
+    if (item) {
+      contextTarget = {
+        type: item.dataset.type,
+        id: item.dataset.id,
+        name: item.dataset.name,
+        md5: item.dataset.md5 || null,
+      };
+
+      // 高亮选中
+      fileList.querySelectorAll('.file-item').forEach(el => el.classList.remove('selected'));
+      item.classList.add('selected');
+
+      let menuHtml = '';
+      if (contextTarget.type === 'folder') {
+        menuHtml = `
+          <div class="menu-item" data-action="open">📂 打开</div>
+          <div class="menu-divider"></div>
+          <div class="menu-item" data-action="rename">✏️ 重命名</div>
+          <div class="menu-item" data-action="move">📦 移动到...</div>
+          <div class="menu-divider"></div>
+          <div class="menu-item danger" data-action="delete">🗑️ 删除</div>
+        `;
+      } else {
+        menuHtml = `
+          <div class="menu-item" data-action="preview">👁️ 查看</div>
+          <div class="menu-item" data-action="download">⬇️ 下载</div>
+          <div class="menu-divider"></div>
+          <div class="menu-item" data-action="rename">✏️ 重命名</div>
+          <div class="menu-item" data-action="move">📦 移动到...</div>
+          <div class="menu-divider"></div>
+          <div class="menu-item danger" data-action="delete">🗑️ 删除</div>
+        `;
+      }
+      contextMenu.innerHTML = menuHtml;
+    } else {
+      // 右键空白区域
+      contextTarget = null;
+      fileList.querySelectorAll('.file-item').forEach(el => el.classList.remove('selected'));
+      contextMenu.innerHTML = `
+        <div class="menu-item" data-action="new-folder">📂 新建文件夹</div>
+        <div class="menu-item" data-action="upload">⬆️ 上传文件</div>
+      `;
+    }
+
+    // 定位菜单
+    contextMenu.classList.remove('hidden');
+    const menuW = contextMenu.offsetWidth;
+    const menuH = contextMenu.offsetHeight;
+    let x = e.clientX;
+    let y = e.clientY;
+    if (x + menuW > window.innerWidth) x = window.innerWidth - menuW - 4;
+    if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - 4;
+    contextMenu.style.left = x + 'px';
+    contextMenu.style.top = y + 'px';
+  });
+
+  // 菜单点击
+  contextMenu.addEventListener('click', (e) => {
+    const menuItem = e.target.closest('.menu-item');
+    if (!menuItem) return;
+    const action = menuItem.dataset.action;
+    contextMenu.classList.add('hidden');
+
+    switch (action) {
+      case 'open':
+        if (contextTarget) { currentFolderId = contextTarget.id; searchInput.value = ''; loadDrive(); }
+        break;
+      case 'preview':
+        if (contextTarget) previewFile(contextTarget.md5, contextTarget.name);
+        break;
+      case 'download':
+        if (contextTarget) downloadFile(contextTarget.md5, contextTarget.name);
+        break;
+      case 'rename':
+        if (contextTarget) renameItem(contextTarget.type, contextTarget.id, contextTarget.name);
+        break;
+      case 'move':
+        if (contextTarget) openMoveDialog(contextTarget.type, contextTarget.id);
+        break;
+      case 'delete':
+        if (contextTarget) deleteItem(contextTarget.type, contextTarget.id);
+        break;
+      case 'new-folder':
+        createFolder();
+        break;
+      case 'upload':
+        fileInput.click();
+        break;
+    }
+  });
+
+  // 隐藏菜单
+  document.addEventListener('click', (e) => {
+    if (!contextMenu.contains(e.target)) {
+      contextMenu.classList.add('hidden');
+      fileList.querySelectorAll('.file-item').forEach(el => el.classList.remove('selected'));
+    }
+  });
+
+  // ===== Folder/File Operations =====
+  newFolderBtn.addEventListener('click', createFolder);
+
+  async function createFolder() {
     const name = prompt('请输入文件夹名称：');
     if (!name || !name.trim()) return;
-
     try {
       const res = await fetch(`${API}/drive/folder`, {
         method: 'POST',
@@ -248,14 +358,16 @@
     } catch (err) {
       showToast('创建失败', 'error');
     }
-  });
+  }
 
-  window._renameFolder = async function(id, oldName) {
-    const name = prompt('请输入新名称：', oldName);
+  async function renameItem(type, id, oldName) {
+    const label = type === 'folder' ? '文件夹' : '文件';
+    const name = prompt(`请输入新${label}名：`, oldName);
     if (!name || !name.trim() || name.trim() === oldName) return;
 
+    const endpoint = type === 'folder' ? `${API}/drive/folder/${id}` : `${API}/drive/file/${id}`;
     try {
-      const res = await fetch(`${API}/drive/folder/${id}`, {
+      const res = await fetch(endpoint, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ name: name.trim() }),
@@ -267,13 +379,15 @@
     } catch (err) {
       showToast('重命名失败', 'error');
     }
-  };
+  }
 
-  window._deleteFolder = async function(id) {
-    if (!confirm('确定删除该文件夹及其所有内容？')) return;
+  async function deleteItem(type, id) {
+    const label = type === 'folder' ? '该文件夹及其所有内容' : '该文件';
+    if (!confirm(`确定删除${label}？`)) return;
 
+    const endpoint = type === 'folder' ? `${API}/drive/folder/${id}` : `${API}/drive/file/${id}`;
     try {
-      const res = await fetch(`${API}/drive/folder/${id}`, {
+      const res = await fetch(endpoint, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -284,53 +398,107 @@
     } catch (err) {
       showToast('删除失败', 'error');
     }
-  };
+  }
 
-  // ===== File Operations =====
-  window._renameFile = async function(id, oldName) {
-    const name = prompt('请输入新文件名：', oldName);
-    if (!name || !name.trim() || name.trim() === oldName) return;
-
-    try {
-      const res = await fetch(`${API}/drive/file/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ name: name.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok) { showToast(data.message, 'error'); return; }
-      showToast('重命名成功', 'success');
-      loadDrive();
-    } catch (err) {
-      showToast('重命名失败', 'error');
-    }
-  };
-
-  window._deleteFile = async function(id) {
-    if (!confirm('确定删除该文件？')) return;
-
-    try {
-      const res = await fetch(`${API}/drive/file/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (!res.ok) { showToast(data.message, 'error'); return; }
-      showToast('删除成功', 'success');
-      loadDrive();
-    } catch (err) {
-      showToast('删除失败', 'error');
-    }
-  };
-
-  window._downloadFile = function(md5, name) {
+  function downloadFile(md5, name) {
     const a = document.createElement('a');
     a.href = `${API}/files/${md5}/download?name=${encodeURIComponent(name)}`;
     a.click();
-  };
+  }
+
+  // ===== Move Dialog =====
+  let moveTarget = { type: null, id: null };
+  let moveCurrentFolderId = null;
+
+  function openMoveDialog(type, id) {
+    moveTarget = { type, id };
+    moveCurrentFolderId = null;
+    moveOverlay.classList.remove('hidden');
+    loadMoveFolders();
+  }
+
+  moveClose.addEventListener('click', () => {
+    moveOverlay.classList.add('hidden');
+  });
+
+  moveOverlay.addEventListener('click', (e) => {
+    if (e.target === moveOverlay) moveOverlay.classList.add('hidden');
+  });
+
+  moveConfirm.addEventListener('click', async () => {
+    try {
+      const res = await fetch(`${API}/drive/move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          type: moveTarget.type,
+          id: moveTarget.id,
+          targetFolderId: moveCurrentFolderId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { showToast(data.message, 'error'); return; }
+      showToast('移动成功', 'success');
+      moveOverlay.classList.add('hidden');
+      loadDrive();
+    } catch (err) {
+      showToast('移动失败', 'error');
+    }
+  });
+
+  async function loadMoveFolders() {
+    try {
+      let url = `${API}/drive?`;
+      if (moveCurrentFolderId) url += `folderId=${moveCurrentFolderId}`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+
+      // 面包屑
+      let bcHtml = '<span data-id="">🏠 根目录</span>';
+      for (const c of (data.breadcrumb || [])) {
+        bcHtml += ' › ';
+        bcHtml += `<span data-id="${c.id}">${escapeHtml(c.name)}</span>`;
+      }
+      moveBreadcrumb.innerHTML = bcHtml;
+
+      moveBreadcrumb.querySelectorAll('span').forEach(el => {
+        el.addEventListener('click', () => {
+          moveCurrentFolderId = el.dataset.id || null;
+          loadMoveFolders();
+        });
+      });
+
+      // 文件夹列表（排除正在移动的文件夹自身）
+      const folders = (data.folders || []).filter(f => {
+        if (moveTarget.type === 'folder' && String(f.id) === String(moveTarget.id)) return false;
+        return true;
+      });
+
+      if (!folders.length) {
+        moveList.innerHTML = '<div class="move-empty">此处没有子文件夹</div>';
+      } else {
+        moveList.innerHTML = folders.map(f => `
+          <div class="move-folder-item" data-id="${f.id}">
+            📁 ${escapeHtml(f.name)}
+          </div>
+        `).join('');
+
+        moveList.querySelectorAll('.move-folder-item').forEach(el => {
+          el.addEventListener('dblclick', () => {
+            moveCurrentFolderId = el.dataset.id;
+            loadMoveFolders();
+          });
+        });
+      }
+    } catch (err) {
+      moveList.innerHTML = '<div class="move-empty">加载失败</div>';
+    }
+  }
 
   // ===== Preview =====
-  window._previewFile = async function(md5, name) {
+  function previewFile(md5, name) {
     previewTitle.textContent = name;
     const ext = getExtension(name).toLowerCase();
     const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg', 'ico'];
@@ -339,18 +507,16 @@
     if (imageExts.includes(ext)) {
       previewContent.innerHTML = `<img src="${API}/files/${md5}/download" alt="${escapeHtml(name)}">`;
     } else if (textExts.includes(ext)) {
-      try {
-        const res = await fetch(`${API}/files/${md5}/download`);
-        const text = await res.text();
-        previewContent.innerHTML = `<pre>${escapeHtml(text)}</pre>`;
-      } catch {
-        previewContent.innerHTML = '<div class="no-preview">加载失败</div>';
-      }
+      previewContent.innerHTML = '<div class="no-preview">加载中...</div>';
+      fetch(`${API}/files/${md5}/download`)
+        .then(r => r.text())
+        .then(text => { previewContent.innerHTML = `<pre>${escapeHtml(text)}</pre>`; })
+        .catch(() => { previewContent.innerHTML = '<div class="no-preview">加载失败</div>'; });
     } else {
       previewContent.innerHTML = '<div class="no-preview">该文件类型不支持预览<br>请下载后查看</div>';
     }
     previewOverlay.classList.remove('hidden');
-  };
+  }
 
   previewClose.addEventListener('click', () => {
     previewOverlay.classList.add('hidden');
@@ -375,11 +541,8 @@
       reader.onload = (e) => {
         spark.append(e.target.result);
         offset += chunkSize;
-        if (offset < file.size) {
-          readNext();
-        } else {
-          resolve(spark.end());
-        }
+        if (offset < file.size) readNext();
+        else resolve(spark.end());
       };
       reader.onerror = () => reject(reader.error);
 
@@ -401,7 +564,6 @@
     uploadStatus.textContent = '正在计算文件指纹...';
 
     try {
-      // Step 1: 计算 MD5
       const fileInfos = [];
       for (let i = 0; i < files.length; i++) {
         uploadStatus.textContent = `正在计算指纹 (${i + 1}/${files.length})...`;
@@ -410,7 +572,6 @@
         fileInfos.push({ file: files[i], md5, originalName: files[i].name });
       }
 
-      // Step 2: 尝试秒传
       uploadStatus.textContent = '正在检查重复文件...';
       progressFill.style.width = '35%';
 
@@ -431,22 +592,18 @@
       );
       const toUpload = fileInfos.filter(f => failedMd5Set.has(f.md5));
 
-      // Step 3: 真实上传
       if (toUpload.length) {
         uploadStatus.textContent = `正在上传 ${toUpload.length} 个新文件...`;
         progressFill.style.width = '40%';
 
         const formData = new FormData();
         formData.append('folderId', currentFolderId || '');
-        for (const f of toUpload) {
-          formData.append('files', f.file);
-        }
+        for (const f of toUpload) formData.append('files', f.file);
 
         await new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest();
           xhr.open('POST', `${API}/files/upload`);
           xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-
           xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {
               const pct = Math.round(40 + (e.loaded / e.total) * 60);
@@ -454,7 +611,6 @@
               uploadStatus.textContent = `上传中... ${Math.round((e.loaded / e.total) * 100)}%`;
             }
           };
-
           xhr.onload = () => {
             if (xhr.status === 200) resolve();
             else if (xhr.status === 401) { logout(); reject(new Error('unauthorized')); }
@@ -476,9 +632,7 @@
     } catch (err) {
       uploadOverlay.classList.add('hidden');
       fileInput.value = '';
-      if (err.message !== 'unauthorized') {
-        showToast(err.message || '上传失败', 'error');
-      }
+      if (err.message !== 'unauthorized') showToast(err.message || '上传失败', 'error');
     }
   });
 
@@ -519,17 +673,10 @@
   }
 
   function escapeAttr(str) {
-    return (str || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    return (str || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
-
-  // ===== Hide context menu on click =====
-  document.addEventListener('click', () => {
-    contextMenu.classList.add('hidden');
-  });
 
   // ===== Init =====
   checkRegisterStatus();
-  if (token) {
-    enterFileManager();
-  }
+  if (token) enterFileManager();
 })();
