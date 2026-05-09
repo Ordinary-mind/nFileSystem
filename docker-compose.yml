@@ -1,0 +1,13 @@
+services:
+  nfilesystem:
+    image: nfilesystem:latest
+    container_name: nfilesystem
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - JWT_SECRET=你的生产密钥
+      - TOKEN_EXPIRES_IN=30d
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
