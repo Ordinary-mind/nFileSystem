@@ -7,8 +7,9 @@ COPY package.json package-lock.json* ./
 
 RUN npm install --production
 
-# 复制源码
+# 复制源码和前端静态文件
 COPY src/ ./src/
+COPY public/ ./public/
 
 # 创建运行时目录
 RUN mkdir -p data uploads/tmp

@@ -25,6 +25,9 @@ if (!fs.existsSync(tempRoot)) {
 
 app.use(express.json());
 
+// 托管前端静态文件
+app.use(express.static(path.join(__dirname, '..', 'public')));
+
 // Multer 临时存储目录，用于接收上传文件后再进行 MD5 归档
 const uploader = multer({
   dest: tempRoot,
@@ -87,10 +90,22 @@ async function persistFileByMD5(file) {
 }
 
 /**
+ * 查询是否允许注册（前端用）
+ */
+app.get('/auth/register-status', (_req, res) => {
+  const allowed = process.env.ALLOW_REGISTER === 'true';
+  res.json({ allowed });
+});
+
+/**
  * 注册
  */
 app.post('/auth/register', async (req, res) => {
   try {
+    if (process.env.ALLOW_REGISTER !== 'true') {
+      return res.status(403).json({ message: '当前不允许注册' });
+    }
+
     const { name, password } = req.body;
     if (!name || !password) {
       return res.status(400).json({ message: 'name 和 password 必填' });
