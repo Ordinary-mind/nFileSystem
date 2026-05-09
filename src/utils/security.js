@@ -26,9 +26,11 @@ async function comparePassword(password, hash) {
 
 /**
  * 生成登录 token
+ * 优先使用 TOKEN_EXPIRES_IN 环境变量，否则开发环境 7 天，生产环境 2 小时
  */
 function signToken(payload) {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '2h' });
+  const expiresIn = process.env.TOKEN_EXPIRES_IN || '2h';
+  return jwt.sign(payload, JWT_SECRET, { expiresIn });
 }
 
 /**

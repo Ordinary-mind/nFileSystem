@@ -302,16 +302,24 @@ app.post('/files/instant', authRequired, async (req, res) => {
 
 /**
  * 文件列表（需要鉴权）
+ * Query: name - 模糊搜索文件名（可选）
  */
 app.get('/files', authRequired, async (req, res) => {
   try {
-    const rows = await all(
-      `SELECT id, original_name, stored_name, md5, size, mime_type, created_at
-       FROM files
-       WHERE user_id = ?
-       ORDER BY id DESC`,
-      [req.user.id]
-    );
+    const { name } = req.query;
+    let sql = `SELECT id, original_name, stored_name, md5, size, mime_type, created_at
+               FROM files
+               WHERE user_id = ?`;
+    const params = [req.user.id];
+
+    if (name && typeof name === 'string') {
+      sql += ' AND original_name LIKE ?';
+      params.push(`%${name}%`);
+    }
+
+    sql += ' ORDER BY id DESC';
+
+    const rows = await all(sql, params);
 
     return res.json({
       count: rows.length,
@@ -323,15 +331,15 @@ app.get('/files', authRequired, async (req, res) => {
 });
 
 /**
- * 文件下载（公开接口，知道 id 即可下载）
+ * 文件下载（公开接口，知道md5即可下载）
  */
-app.get('/files/:id/download', async (req, res) => {
+app.get('/files/:md5/download', async (req, res) => {
   try {
-    const { id } = req.params;
+    const { md5 } = req.params;
 
     const record = await get(
-      'SELECT id, original_name, stored_name, md5 FROM files WHERE id = ?',
-      [id]
+      'SELECT id, original_name, stored_name, md5 FROM files WHERE md5 = ?',
+      [md5]
     );
 
     if (!record) {
