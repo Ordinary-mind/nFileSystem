@@ -147,3 +147,20 @@ npm start
 - 相对路径：`a1/b2/a1b2c3d4e5f6....pdf`
 
 ---
+
+
+## 本地构建镜像：
+
+`docker build -t nfilesystem:latest .`
+
+## 导出镜像为 tar 文件：
+
+`docker save -o nfilesystem.tar nfilesystem:latest`
+
+## 拷贝到服务器后加载：
+
+`docker load -i nfilesystem.tar`
+
+## 启动容器：
+
+把`docker-compose.yml`f放到想要的目录然后`docker compose up -d`
