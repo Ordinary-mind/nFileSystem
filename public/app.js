@@ -41,8 +41,22 @@
     toast.className = `toast ${type}`;
     toast.textContent = text;
     container.appendChild(toast);
-    setTimeout(() => toast.remove(), 3000);
+    setTimeout(() => toast.remove(), 1000);
   }
+
+  // ===== Password Toggle =====
+  document.querySelectorAll('.eye-toggle').forEach(toggle => {
+    toggle.addEventListener('click', () => {
+      const input = document.getElementById(toggle.dataset.target);
+      if (input.type === 'password') {
+        input.type = 'text';
+        toggle.classList.add('active');
+      } else {
+        input.type = 'password';
+        toggle.classList.remove('active');
+      }
+    });
+  });
 
   // ===== Auth Tabs =====
   document.querySelectorAll('.tab').forEach(tab => {
