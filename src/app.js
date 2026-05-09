@@ -24,7 +24,7 @@ if (!fs.existsSync(tempRoot)) {
 }
 
 app.use(express.json());
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const uploader = multer({
@@ -69,7 +69,16 @@ async function persistFileByMD5(file) {
   await fs.promises.mkdir(targetDir, { recursive: true });
 
   if (!(await fileExists(targetPath))) {
-    await fs.promises.rename(file.path, targetPath);
+    try {
+      await fs.promises.rename(file.path, targetPath);
+    } catch (err) {
+      if (err.code === 'EXDEV') {
+        await fs.promises.copyFile(file.path, targetPath);
+        await fs.promises.unlink(file.path);
+      } else {
+        throw err;
+      }
+    }
   } else {
     await fs.promises.unlink(file.path);
   }
@@ -122,6 +131,36 @@ function addLog({ userId = null, action, targetType = null, targetId = null, det
 
 // ===== 认证接口 =====
 
+// 简易登录限流：同一 IP 1 分钟内最多 10 次尝试
+const loginAttempts = new Map(); // ip -> { count, resetTime }
+const LOGIN_LIMIT = 10;
+const LOGIN_WINDOW = 60 * 1000; // 1 分钟
+
+function checkLoginRate(req) {
+  const ip = getClientIp(req);
+  const now = Date.now();
+  const record = loginAttempts.get(ip);
+
+  if (!record || now > record.resetTime) {
+    loginAttempts.set(ip, { count: 1, resetTime: now + LOGIN_WINDOW });
+    return true;
+  }
+
+  record.count++;
+  if (record.count > LOGIN_LIMIT) {
+    return false;
+  }
+  return true;
+}
+
+// 定期清理过期记录
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, record] of loginAttempts) {
+    if (now > record.resetTime) loginAttempts.delete(ip);
+  }
+}, 5 * 60 * 1000);
+
 app.get('/auth/register-status', (_req, res) => {
   const allowed = process.env.ALLOW_REGISTER === 'true';
   res.json({ allowed });
@@ -135,6 +174,12 @@ app.post('/auth/register', async (req, res) => {
     const { name, password } = req.body;
     if (!name || !password) {
       return res.status(400).json({ message: 'name 和 password 必填' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ message: '密码至少 6 位' });
+    }
+    if (name.length < 2 || name.length > 32) {
+      return res.status(400).json({ message: '用户名长度 2-32 位' });
     }
     const hashed = await hashPassword(password);
     const result = await run('INSERT INTO users(name, password) VALUES (?, ?)', [name, hashed]);
@@ -151,6 +196,10 @@ app.post('/auth/register', async (req, res) => {
 
 app.post('/auth/login', async (req, res) => {
   try {
+    if (!checkLoginRate(req)) {
+      return res.status(429).json({ message: '登录尝试过于频繁，请稍后再试' });
+    }
+
     const { name, password } = req.body;
     if (!name || !password) {
       return res.status(400).json({ message: 'name 和 password 必填' });
@@ -493,6 +542,19 @@ app.post('/drive/move', authRequired, async (req, res) => {
       const folder = await get('SELECT id FROM user_folders WHERE id = ? AND user_id = ?', [id, req.user.id]);
       if (!folder) return res.status(404).json({ message: '文件夹不存在' });
       if (Number(id) === Number(target)) return res.status(400).json({ message: '不能移动到自身' });
+
+      // 检查目标是否是自己的子孙文件夹（防止循环）
+      if (target) {
+        let checkId = target;
+        while (checkId) {
+          if (Number(checkId) === Number(id)) {
+            return res.status(400).json({ message: '不能移动到自身的子文件夹中' });
+          }
+          const parent = await get('SELECT parent_id FROM user_folders WHERE id = ? AND user_id = ?', [checkId, req.user.id]);
+          checkId = parent ? parent.parent_id : null;
+        }
+      }
+
       await run('UPDATE user_folders SET parent_id = ? WHERE id = ?', [target, id]);
     } else {
       const file = await get('SELECT id FROM user_files WHERE id = ? AND user_id = ?', [id, req.user.id]);
@@ -508,9 +570,17 @@ app.post('/drive/move', authRequired, async (req, res) => {
 
 // ===== 文件下载 =====
 
-app.get('/files/:md5/download', async (req, res) => {
+app.get('/files/:md5/download', authRequired, async (req, res) => {
   try {
     const { md5 } = req.params;
+
+    // 验证该用户有引用此文件
+    const userFile = await get(
+      `SELECT uf.name FROM user_files uf JOIN files f ON uf.file_id = f.id WHERE f.md5 = ? AND uf.user_id = ? LIMIT 1`,
+      [md5, req.user.id]
+    );
+    if (!userFile) return res.status(404).json({ message: '文件不存在' });
+
     const record = await get('SELECT stored_name FROM files WHERE md5 = ?', [md5]);
     if (!record) return res.status(404).json({ message: '文件不存在' });
 
@@ -519,18 +589,11 @@ app.get('/files/:md5/download', async (req, res) => {
       return res.status(404).json({ message: '文件物理路径不存在' });
     }
 
-    // 尝试从 query 获取文件名
-    const fileName = req.query.name || record.stored_name;
+    const fileName = req.query.name || userFile.name || record.stored_name;
     return res.download(filePath, fileName);
   } catch (err) {
     return res.status(500).json({ message: '下载失败', error: err.message });
   }
-});
-
-// ===== 根路由 =====
-
-app.get('/', (_req, res) => {
-  res.json({ message: '文件管理系统服务运行中' });
 });
 
 // eslint-disable-next-line no-unused-vars

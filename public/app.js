@@ -114,7 +114,7 @@
     const password = document.getElementById('reg-password').value;
     const password2 = document.getElementById('reg-password2').value;
     if (password !== password2) { showMessage('两次密码不一致', 'error'); return; }
-    if (password.length < 4) { showMessage('密码至少 4 位', 'error'); return; }
+    if (password.length < 6) { showMessage('密码至少 6 位', 'error'); return; }
 
     try {
       const res = await fetch(`${API}/auth/register`, {
@@ -415,9 +415,23 @@
   }
 
   function downloadFile(md5, name) {
-    const a = document.createElement('a');
-    a.href = `${API}/files/${md5}/download?name=${encodeURIComponent(name)}`;
-    a.click();
+    // 需要带 token，用 fetch + blob 方式下载
+    fetch(`${API}/files/${md5}/download?name=${encodeURIComponent(name)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(res => {
+        if (!res.ok) throw new Error('下载失败');
+        return res.blob();
+      })
+      .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(url);
+      })
+      .catch(() => showToast('下载失败', 'error'));
   }
 
   // ===== Move Dialog =====
@@ -519,10 +533,17 @@
     const textExts = ['txt', 'md', 'json', 'js', 'ts', 'css', 'html', 'xml', 'yml', 'yaml', 'conf', 'ini', 'sh', 'bat', 'log', 'csv', 'env'];
 
     if (imageExts.includes(ext)) {
-      previewContent.innerHTML = `<img src="${API}/files/${md5}/download" alt="${escapeHtml(name)}">`;
+      // 图片需要用 blob URL 展示（因为接口需要 token）
+      fetch(`${API}/files/${md5}/download`, { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.blob())
+        .then(blob => {
+          const url = URL.createObjectURL(blob);
+          previewContent.innerHTML = `<img src="${url}" alt="${escapeHtml(name)}">`;
+        })
+        .catch(() => { previewContent.innerHTML = '<div class="no-preview">加载失败</div>'; });
     } else if (textExts.includes(ext)) {
       previewContent.innerHTML = '<div class="no-preview">加载中...</div>';
-      fetch(`${API}/files/${md5}/download`)
+      fetch(`${API}/files/${md5}/download`, { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.text())
         .then(text => { previewContent.innerHTML = `<pre>${escapeHtml(text)}</pre>`; })
         .catch(() => { previewContent.innerHTML = '<div class="no-preview">加载失败</div>'; });
