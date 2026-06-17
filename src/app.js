@@ -8,7 +8,7 @@ const multer = require('multer');
 
 const { initDb, run, get, all } = require('./db');
 const { hashPassword, comparePassword, signToken } = require('./utils/security');
-const { authRequired } = require('./middleware/auth');
+const { authRequired, apiTokenRequired, hashApiToken } = require('./middleware/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -103,6 +103,111 @@ function isValidFileName(name) {
 
 function getFilePath(md5, storedName) {
   return path.join(uploadRoot, md5.slice(0, 2), md5.slice(2, 4), storedName);
+}
+
+function randomToken(prefix) {
+  return `${prefix}_${crypto.randomBytes(32).toString('base64url')}`;
+}
+
+function normalizeScopes(scopes, fallback) {
+  const values = Array.isArray(scopes)
+    ? scopes
+    : (typeof scopes === 'string' ? scopes.split(',') : fallback);
+  return [...new Set(values.map((scope) => String(scope).trim()).filter(Boolean))].join(',');
+}
+
+function toExpiresAt(expiresInSeconds) {
+  const seconds = Number(expiresInSeconds);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return new Date(Date.now() + seconds * 1000).toISOString();
+}
+
+function buildPublicUrl(req, pathname) {
+  return `${req.protocol}://${req.get('host')}${pathname}`;
+}
+
+async function isFolderInsideRoot(folderId, rootFolderId, userId) {
+  let currentId = folderId;
+  while (currentId) {
+    if (Number(currentId) === Number(rootFolderId)) return true;
+    const folder = await get('SELECT parent_id FROM user_folders WHERE id = ? AND user_id = ?', [currentId, userId]);
+    currentId = folder ? folder.parent_id : null;
+  }
+  return false;
+}
+
+async function requireFolderInsideRoot(folderId, rootFolderId, userId) {
+  const targetFolderId = folderId || rootFolderId;
+  const allowed = await isFolderInsideRoot(targetFolderId, rootFolderId, userId);
+  if (!allowed) {
+    const err = new Error('target_folder_forbidden');
+    err.status = 403;
+    throw err;
+  }
+  return targetFolderId;
+}
+
+async function requireUserFileInsideRoot(userFileId, rootFolderId, userId) {
+  const file = await get(
+    `SELECT uf.id, uf.folder_id, uf.name, f.id AS file_id, f.md5, f.size, f.mime_type, f.stored_name
+     FROM user_files uf
+     JOIN files f ON uf.file_id = f.id
+     WHERE uf.id = ? AND uf.user_id = ?`,
+    [userFileId, userId]
+  );
+  if (!file) return null;
+  const allowed = await isFolderInsideRoot(file.folder_id, rootFolderId, userId);
+  return allowed ? file : null;
+}
+
+async function saveUploadedFileReference(file, userId, folderId) {
+  const archived = await persistFileByMD5(file);
+
+  let fileRecord = await get('SELECT id FROM files WHERE md5 = ?', [archived.md5]);
+  if (!fileRecord) {
+    const result = await run(
+      'INSERT INTO files(stored_name, md5, size, mime_type) VALUES (?, ?, ?, ?)',
+      [archived.storedName, archived.md5, archived.size, archived.mimeType]
+    );
+    fileRecord = { id: result.lastID };
+  }
+
+  const duplicate = await get(
+    'SELECT id FROM user_files WHERE user_id = ? AND folder_id IS ? AND file_id = ? AND name = ?',
+    [userId, folderId, fileRecord.id, file.originalname]
+  );
+
+  if (duplicate) {
+    return { id: duplicate.id, name: file.originalname, md5: archived.md5, size: archived.size, mimeType: archived.mimeType, duplicate: true };
+  }
+
+  const ufResult = await run(
+    'INSERT INTO user_files(user_id, folder_id, file_id, name) VALUES (?, ?, ?, ?)',
+    [userId, folderId, fileRecord.id, file.originalname]
+  );
+
+  return { id: ufResult.lastID, name: file.originalname, md5: archived.md5, size: archived.size, mimeType: archived.mimeType, duplicate: false };
+}
+
+async function createAccessLink({ req, userId, integrationId, userFileId, expiresInSeconds, maxUses, disposition = 'inline' }) {
+  const token = randomToken('nfs_al');
+  const expiresAt = toExpiresAt(expiresInSeconds);
+  const normalizedDisposition = disposition === 'download' ? 'download' : 'inline';
+  const normalizedMaxUses = Number.isFinite(Number(maxUses)) && Number(maxUses) > 0 ? Number(maxUses) : null;
+
+  const result = await run(
+    `INSERT INTO access_links(user_id, integration_id, user_file_id, token_hash, disposition, expires_at, max_uses)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [userId, integrationId, userFileId, hashApiToken(token), normalizedDisposition, expiresAt, normalizedMaxUses]
+  );
+
+  return {
+    id: result.lastID,
+    url: buildPublicUrl(req, `/access/${token}`),
+    expiresAt,
+    maxUses: normalizedMaxUses,
+    disposition: normalizedDisposition,
+  };
 }
 
 /**
@@ -230,6 +335,148 @@ app.post('/auth/login', async (req, res) => {
 });
 
 // ===== 文件上传（写入 files 物理存储表）=====
+
+// ===== 接入应用管理 =====
+
+function parseScopesForRoute(scopes) {
+  return String(scopes || '')
+    .split(',')
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+}
+
+app.get('/integrations', authRequired, async (req, res) => {
+  try {
+    const integrations = await all(
+      `SELECT i.id, i.name, i.root_folder_id, i.scopes, i.enabled, i.created_at,
+              f.name AS root_folder_name
+       FROM integrations i
+       LEFT JOIN user_folders f ON i.root_folder_id = f.id
+       WHERE i.user_id = ?
+       ORDER BY i.id DESC`,
+      [req.user.id]
+    );
+    return res.json({ integrations });
+  } catch (err) {
+    return res.status(500).json({ message: '获取接入应用失败', error: err.message });
+  }
+});
+
+app.post('/integrations', authRequired, async (req, res) => {
+  try {
+    const { name, rootFolderName, rootFolderId, scopes, createToken = true } = req.body;
+    if (!name || typeof name !== 'string' || name.length > 64) {
+      return res.status(400).json({ message: '接入应用名称不合法' });
+    }
+
+    let appRootFolderId = rootFolderId || null;
+    if (appRootFolderId) {
+      const folder = await get('SELECT id FROM user_folders WHERE id = ? AND user_id = ?', [appRootFolderId, req.user.id]);
+      if (!folder) return res.status(400).json({ message: '应用根目录不存在' });
+    } else {
+      const folderName = rootFolderName || name;
+      if (!isValidFileName(folderName)) {
+        return res.status(400).json({ message: '应用根目录名称不合法' });
+      }
+
+      const existing = await get(
+        'SELECT id FROM user_folders WHERE user_id = ? AND parent_id IS NULL AND name = ?',
+        [req.user.id, folderName]
+      );
+      if (existing) {
+        appRootFolderId = existing.id;
+      } else {
+        const folderResult = await run(
+          'INSERT INTO user_folders(user_id, parent_id, name) VALUES (?, NULL, ?)',
+          [req.user.id, folderName]
+        );
+        appRootFolderId = folderResult.lastID;
+      }
+    }
+
+    const normalizedScopes = normalizeScopes(scopes, ['files:upload', 'files:read', 'files:delete', 'links:create']);
+    const result = await run(
+      'INSERT INTO integrations(user_id, name, root_folder_id, scopes) VALUES (?, ?, ?, ?)',
+      [req.user.id, name, appRootFolderId, normalizedScopes]
+    );
+
+    let tokenInfo = null;
+    if (createToken) {
+      const token = randomToken('nfs_pat');
+      const tokenResult = await run(
+        'INSERT INTO api_tokens(integration_id, user_id, name, token_hash, scopes) VALUES (?, ?, ?, ?, ?)',
+        [result.lastID, req.user.id, 'default', hashApiToken(token), normalizedScopes]
+      );
+      tokenInfo = { id: tokenResult.lastID, token };
+    }
+
+    return res.json({
+      message: '创建接入应用成功',
+      integration: {
+        id: result.lastID,
+        name,
+        rootFolderId: appRootFolderId,
+        scopes: normalizedScopes.split(','),
+      },
+      token: tokenInfo,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: '创建接入应用失败', error: err.message });
+  }
+});
+
+app.post('/integrations/:id/tokens', authRequired, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const integration = await get('SELECT id, scopes FROM integrations WHERE id = ? AND user_id = ?', [id, req.user.id]);
+    if (!integration) return res.status(404).json({ message: '接入应用不存在' });
+
+    const { name = 'token', scopes, expiresInSeconds } = req.body;
+    const allowedScopes = parseScopesForRoute(integration.scopes);
+    const requestedScopes = scopes ? parseScopesForRoute(normalizeScopes(scopes, [])) : allowedScopes;
+    const finalScopes = requestedScopes.filter((scope) => allowedScopes.includes(scope));
+    if (!finalScopes.length) return res.status(400).json({ message: 'token 权限不能为空' });
+
+    const token = randomToken('nfs_pat');
+    const result = await run(
+      'INSERT INTO api_tokens(integration_id, user_id, name, token_hash, scopes, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [id, req.user.id, name, hashApiToken(token), finalScopes.join(','), toExpiresAt(expiresInSeconds)]
+    );
+    return res.json({ message: '创建 API Token 成功', token: { id: result.lastID, token, scopes: finalScopes } });
+  } catch (err) {
+    return res.status(500).json({ message: '创建 API Token 失败', error: err.message });
+  }
+});
+
+app.put('/integrations/:id', authRequired, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const enabled = req.body.enabled === true || req.body.enabled === 1 ? 1 : 0;
+    const result = await run(
+      'UPDATE integrations SET enabled = ? WHERE id = ? AND user_id = ?',
+      [enabled, id, req.user.id]
+    );
+    if (!result.changes) return res.status(404).json({ message: '接入应用不存在' });
+    return res.json({ message: enabled ? '接入应用已启用' : '接入应用已禁用', enabled: Boolean(enabled) });
+  } catch (err) {
+    return res.status(500).json({ message: '更新接入应用失败', error: err.message });
+  }
+});
+
+app.delete('/integrations/:integrationId/tokens/:tokenId', authRequired, async (req, res) => {
+  try {
+    const { integrationId, tokenId } = req.params;
+    const result = await run(
+      `UPDATE api_tokens SET revoked_at = datetime('now', 'localtime')
+       WHERE id = ? AND integration_id = ? AND user_id = ? AND revoked_at IS NULL`,
+      [tokenId, integrationId, req.user.id]
+    );
+    if (!result.changes) return res.status(404).json({ message: 'API Token 不存在或已撤销' });
+    return res.json({ message: 'API Token 已撤销' });
+  } catch (err) {
+    return res.status(500).json({ message: '撤销 API Token 失败', error: err.message });
+  }
+});
 
 app.post('/files/upload', authRequired, (req, res, next) => {
   uploader.array('files', 20)(req, res, (err) => {
@@ -576,6 +823,164 @@ app.post('/drive/move', authRequired, async (req, res) => {
 });
 
 // ===== 文件下载 =====
+
+// ===== 应用接入 API =====
+
+app.get('/api/v1/files', apiTokenRequired(['files:read']), async (req, res) => {
+  try {
+    const folderId = req.query.folderId || req.apiAuth.rootFolderId;
+    const targetFolderId = await requireFolderInsideRoot(folderId, req.apiAuth.rootFolderId, req.apiAuth.userId);
+    const files = await all(
+      `SELECT uf.id, uf.name, uf.created_at, f.md5, f.size, f.mime_type
+       FROM user_files uf
+       JOIN files f ON uf.file_id = f.id
+       WHERE uf.user_id = ? AND uf.folder_id IS ?
+       ORDER BY uf.id DESC`,
+      [req.apiAuth.userId, targetFolderId]
+    );
+    const folders = await all(
+      'SELECT id, name, created_at FROM user_folders WHERE user_id = ? AND parent_id IS ? ORDER BY name',
+      [req.apiAuth.userId, targetFolderId]
+    );
+    return res.json({ rootFolderId: req.apiAuth.rootFolderId, folderId: targetFolderId, folders, files });
+  } catch (err) {
+    const status = err.status || 500;
+    return res.status(status).json({ message: status === 403 ? '目标目录不在应用根目录内' : '获取应用文件失败', error: err.message });
+  }
+});
+
+app.post('/api/v1/folders', apiTokenRequired(['files:upload']), async (req, res) => {
+  try {
+    const { name, parentId } = req.body;
+    if (!isValidFileName(name)) return res.status(400).json({ message: '文件夹名称不合法' });
+
+    const targetParentId = await requireFolderInsideRoot(parentId || req.apiAuth.rootFolderId, req.apiAuth.rootFolderId, req.apiAuth.userId);
+    const existing = await get(
+      'SELECT id FROM user_folders WHERE user_id = ? AND parent_id IS ? AND name = ?',
+      [req.apiAuth.userId, targetParentId, name]
+    );
+    if (existing) return res.status(409).json({ message: '同名文件夹已存在', id: existing.id });
+
+    const result = await run(
+      'INSERT INTO user_folders(user_id, parent_id, name) VALUES (?, ?, ?)',
+      [req.apiAuth.userId, targetParentId, name]
+    );
+    return res.json({ message: '创建文件夹成功', folder: { id: result.lastID, name, parentId: targetParentId } });
+  } catch (err) {
+    const status = err.status || 500;
+    return res.status(status).json({ message: status === 403 ? '目标目录不在应用根目录内' : '创建应用文件夹失败', error: err.message });
+  }
+});
+
+app.post('/api/v1/files/upload', apiTokenRequired(['files:upload']), (req, res, next) => {
+  uploader.array('files', 20)(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_UNEXPECTED_FILE') return res.status(400).json({ message: '文件字段名必须为 files' });
+      if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ message: '单个文件不能超过 50MB' });
+      if (err.code === 'LIMIT_FILE_COUNT') return res.status(400).json({ message: '单次最多上传 20 个文件' });
+      return res.status(400).json({ message: '上传出错', error: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
+  try {
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ message: '请至少上传一个文件，字段名为 files' });
+
+    const targetFolderId = await requireFolderInsideRoot(req.body.folderId, req.apiAuth.rootFolderId, req.apiAuth.userId);
+    const withAccessLink = req.body.withAccessLink === 'true' || req.body.withAccessLink === true;
+    const expiresInSeconds = req.body.expiresInSeconds ? Number(req.body.expiresInSeconds) : null;
+    const saved = [];
+
+    for (const file of files) {
+      const item = await saveUploadedFileReference(file, req.apiAuth.userId, targetFolderId);
+      if (withAccessLink && req.apiAuth.scopes.includes('links:create')) {
+        item.accessLink = await createAccessLink({
+          req,
+          userId: req.apiAuth.userId,
+          integrationId: req.apiAuth.integrationId,
+          userFileId: item.id,
+          expiresInSeconds,
+          disposition: req.body.disposition,
+        });
+      }
+      saved.push(item);
+    }
+
+    return res.json({ message: '上传成功', rootFolderId: req.apiAuth.rootFolderId, folderId: targetFolderId, count: saved.length, files: saved });
+  } catch (err) {
+    const status = err.status || 500;
+    return res.status(status).json({ message: status === 403 ? '目标目录不在应用根目录内' : '应用上传失败', error: err.message });
+  }
+});
+
+app.post('/api/v1/files/:id/access-links', apiTokenRequired(['links:create']), async (req, res) => {
+  try {
+    const file = await requireUserFileInsideRoot(req.params.id, req.apiAuth.rootFolderId, req.apiAuth.userId);
+    if (!file) return res.status(404).json({ message: '文件不存在或不在应用根目录内' });
+
+    const link = await createAccessLink({
+      req,
+      userId: req.apiAuth.userId,
+      integrationId: req.apiAuth.integrationId,
+      userFileId: file.id,
+      expiresInSeconds: req.body.expiresInSeconds,
+      maxUses: req.body.maxUses,
+      disposition: req.body.disposition,
+    });
+    return res.json({ message: '创建访问链接成功', file: { id: file.id, name: file.name, md5: file.md5 }, accessLink: link });
+  } catch (err) {
+    return res.status(500).json({ message: '创建访问链接失败', error: err.message });
+  }
+});
+
+app.delete('/api/v1/files/:id', apiTokenRequired(['files:delete']), async (req, res) => {
+  try {
+    const file = await requireUserFileInsideRoot(req.params.id, req.apiAuth.rootFolderId, req.apiAuth.userId);
+    if (!file) return res.status(404).json({ message: '文件不存在或不在应用根目录内' });
+    await run('DELETE FROM user_files WHERE id = ? AND user_id = ?', [file.id, req.apiAuth.userId]);
+    return res.json({ message: '删除成功' });
+  } catch (err) {
+    return res.status(500).json({ message: '删除应用文件失败', error: err.message });
+  }
+});
+
+app.get('/access/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    const link = await get(
+      `SELECT al.id, al.user_file_id, al.disposition, al.expires_at, al.max_uses, al.use_count, al.revoked_at,
+              uf.name, f.md5, f.stored_name, f.mime_type
+       FROM access_links al
+       JOIN user_files uf ON al.user_file_id = uf.id
+       JOIN files f ON uf.file_id = f.id
+       WHERE al.token_hash = ?`,
+      [hashApiToken(token)]
+    );
+
+    if (!link || link.revoked_at) return res.status(404).json({ message: '访问链接不存在' });
+    if (link.expires_at && new Date(link.expires_at).getTime() <= Date.now()) {
+      return res.status(410).json({ message: '访问链接已过期' });
+    }
+    if (link.max_uses && link.use_count >= link.max_uses) {
+      return res.status(410).json({ message: '访问链接已超过使用次数' });
+    }
+
+    const filePath = getFilePath(link.md5, link.stored_name);
+    if (!(await fileExists(filePath))) return res.status(404).json({ message: '文件物理路径不存在' });
+
+    await run('UPDATE access_links SET use_count = use_count + 1 WHERE id = ?', [link.id]);
+    const fileName = req.query.name || link.name || link.stored_name;
+    if (link.mime_type) res.type(link.mime_type);
+    if (link.disposition === 'download') {
+      return res.download(filePath, fileName);
+    }
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(fileName)}"`);
+    return res.sendFile(filePath);
+  } catch (err) {
+    return res.status(500).json({ message: '访问文件失败', error: err.message });
+  }
+});
 
 app.get('/files/:md5/download', authRequired, async (req, res) => {
   try {

@@ -110,12 +110,59 @@ async function initDb() {
     )
   `);
 
+  await run(`
+    CREATE TABLE IF NOT EXISTS integrations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      root_folder_id INTEGER NOT NULL,
+      scopes TEXT NOT NULL,
+      enabled INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS api_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      integration_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      scopes TEXT NOT NULL,
+      expires_at TEXT,
+      revoked_at TEXT,
+      last_used_at TEXT,
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS access_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      integration_id INTEGER NOT NULL,
+      user_file_id INTEGER NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      disposition TEXT DEFAULT 'inline',
+      expires_at TEXT,
+      max_uses INTEGER,
+      use_count INTEGER DEFAULT 0,
+      revoked_at TEXT,
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
   await run('CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5)');
   await run('CREATE INDEX IF NOT EXISTS idx_user_folders_user ON user_folders(user_id, parent_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_user_files_user ON user_files(user_id, folder_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_logs_user ON logs(user_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_logs_action ON logs(action)');
   await run('CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at)');
+  await run('CREATE INDEX IF NOT EXISTS idx_integrations_user ON integrations(user_id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id, integration_id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_access_links_token ON access_links(token_hash)');
+  await run('CREATE INDEX IF NOT EXISTS idx_access_links_file ON access_links(user_file_id)');
 }
 
 module.exports = {
