@@ -33,6 +33,13 @@ const uploader = multer({
     files: 20,
     fileSize: 50 * 1024 * 1024,
   },
+  fileFilter: (_req, file, cb) => {
+    // 修复 Linux 下中文文件名乱码：multer/busboy 以 latin1 解码 filename，需还原为 UTF-8
+    if (file.originalname) {
+      file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    }
+    cb(null, true);
+  },
 });
 
 // ===== 工具函数 =====
