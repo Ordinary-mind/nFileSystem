@@ -84,7 +84,7 @@ cp .env.example .env
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `PORT` | 服务端口 | `6001` |
+| `PORT` | 本地运行服务端口；Docker 部署时作为宿主机映射端口 | `6001` |
 | `JWT_SECRET` | JWT 签名密钥，不配置服务会拒绝启动 | 无（必填） |
 | `TOKEN_EXPIRES_IN` | Token 有效期 | 开发 `7d` / 生产 `2h` |
 | `ALLOW_REGISTER` | 是否允许注册 | `false` |
@@ -94,7 +94,7 @@ cp .env.example .env
 ### 构建镜像
 
 ```bash
-docker build -t nfilesystem:latest .
+docker build -t n-file-system:latest .
 ```
 
 ### 使用 docker-compose 启动
@@ -107,13 +107,14 @@ docker compose up -d
 
 ```yaml
 services:
-  nfilesystem:
-    image: nfilesystem:latest
-    container_name: nfilesystem
+  n-file-system:
+    image: n-file-system:latest
+    container_name: n-file-system
     restart: unless-stopped
     ports:
-      - "6001:3000"
+      - "${PORT:-6001}:3000"
     environment:
+      PORT: 3000
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       TOKEN_EXPIRES_IN: ${TOKEN_EXPIRES_IN:-30d}
       ALLOW_REGISTER: ${ALLOW_REGISTER:-false}
@@ -126,10 +127,10 @@ services:
 
 ```bash
 # 导出镜像
-docker save -o nfilesystem.tar nfilesystem:latest
+docker save -o n-file-system.tar n-file-system:latest
 
 # 在目标服务器加载镜像
-docker load -i nfilesystem.tar
+docker load -i n-file-system.tar
 
 # 启动
 docker compose up -d

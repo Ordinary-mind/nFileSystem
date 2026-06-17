@@ -5,7 +5,8 @@
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",
-    "dev": "nodemon src/app.js"
+    "dev": "nodemon src/app.js",
+    "build:docker": "docker build -t n-file-system:latest . && docker save -o n-file-system.tar n-file-system:latest"
   },
   "keywords": [
     "express",

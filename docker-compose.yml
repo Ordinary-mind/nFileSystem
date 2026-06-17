@@ -1,11 +1,12 @@
 services:
-  nfilesystem:
-    image: nfilesystem:latest
-    container_name: nfilesystem
+  n-file-system:
+    image: n-file-system:latest
+    container_name: n-file-system
     restart: unless-stopped
     ports:
-      - "6001:3000"
+      - "${PORT:-6001}:3000"
     environment:
+      PORT: 3000
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       TOKEN_EXPIRES_IN: ${TOKEN_EXPIRES_IN:-30d}
       ALLOW_REGISTER: ${ALLOW_REGISTER:-false}
