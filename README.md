@@ -206,8 +206,10 @@ API Token 权限：
 应用 API 请求头：
 
 ```http
-Authorization: Bearer <api-token>
+N-File-Token: <api-token>
 ```
+
+为兼容旧接入方式，应用 API 也继续支持 `Authorization: Bearer <api-token>`。如果第三方系统已经使用自己的 `Authorization`，推荐使用 `N-File-Token`。
 
 ### 访问链接接口（无需登录）
 
@@ -255,7 +257,7 @@ curl -X POST http://localhost:6001/integrations \
 
 ```bash
 curl -X POST http://localhost:6001/api/v1/files/upload \
-  -H "Authorization: Bearer <api-token>" \
+  -H "N-File-Token: <api-token>" \
   -F "files=@/path/to/song.mp3" \
   -F "withAccessLink=true" \
   -F "disposition=inline"

@@ -18,6 +18,17 @@ function hasRequiredScopes(grantedScopes, requiredScopes) {
   return requiredScopes.every((scope) => grantedScopes.includes(scope));
 }
 
+function getApiTokenFromRequest(req) {
+  const fileToken = req.headers['n-file-token'];
+  if (fileToken) return String(fileToken).trim();
+
+  const authHeader = req.headers.authorization || '';
+  const [type, token] = authHeader.split(' ');
+  if (type === 'Bearer' && token) return token;
+
+  return '';
+}
+
 /**
  * JWT 鉴权中间件
  * Header: Authorization: Bearer <token>
@@ -42,10 +53,9 @@ function authRequired(req, res, next) {
 function apiTokenRequired(requiredScopes = []) {
   return async (req, res, next) => {
     try {
-      const authHeader = req.headers.authorization || '';
-      const [type, token] = authHeader.split(' ');
+      const token = getApiTokenFromRequest(req);
 
-      if (type !== 'Bearer' || !token) {
+      if (!token) {
         return res.status(401).json({ message: 'API token 缺失' });
       }
 

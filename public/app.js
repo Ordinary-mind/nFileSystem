@@ -593,13 +593,50 @@
   copyTokenBtn.addEventListener('click', async () => {
     const value = newTokenValue.textContent.trim();
     if (!value) return;
-    try {
-      await navigator.clipboard.writeText(value);
+    const copied = await copyText(value);
+    if (copied) {
       showToast('Token 已复制', 'success');
-    } catch (err) {
-      showToast('复制失败，请手动复制', 'error');
+      return;
     }
+    selectTokenText();
+    showToast('已选中 Token，请手动复制', 'error');
   });
+
+  async function copyText(value) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(value);
+        return true;
+      }
+    } catch (err) { /* fallback */ }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.top = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+
+    let copied = false;
+    try {
+      copied = document.execCommand('copy');
+    } catch (err) {
+      copied = false;
+    }
+    textarea.remove();
+    return copied;
+  }
+
+  function selectTokenText() {
+    const range = document.createRange();
+    range.selectNodeContents(newTokenValue);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
 
   async function loadIntegrations() {
     integrationsList.innerHTML = '<div class="tokens-empty">加载中...</div>';
