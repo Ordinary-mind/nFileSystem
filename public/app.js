@@ -33,6 +33,17 @@
   const moveBreadcrumb = document.getElementById('move-breadcrumb');
   const moveClose = document.getElementById('move-close');
   const moveConfirm = document.getElementById('move-confirm');
+  const integrationsBtn = document.getElementById('integrations-btn');
+  const integrationsOverlay = document.getElementById('integrations-overlay');
+  const integrationsClose = document.getElementById('integrations-close');
+  const integrationForm = document.getElementById('integration-form');
+  const integrationName = document.getElementById('integration-name');
+  const integrationRoot = document.getElementById('integration-root');
+  const integrationsList = document.getElementById('integrations-list');
+  const tokensPanel = document.getElementById('tokens-panel');
+  const newTokenBox = document.getElementById('new-token-box');
+  const newTokenValue = document.getElementById('new-token-value');
+  const copyTokenBtn = document.getElementById('copy-token-btn');
 
   // ===== Toast =====
   function showToast(text, type = 'success') {
@@ -523,6 +534,270 @@
     } catch (err) {
       moveList.innerHTML = '<div class="move-empty">加载失败</div>';
     }
+  }
+
+  // ===== Integrations =====
+  let integrations = [];
+  let selectedIntegrationId = null;
+
+  integrationsBtn.addEventListener('click', () => {
+    integrationsOverlay.classList.remove('hidden');
+    newTokenBox.classList.add('hidden');
+    loadIntegrations();
+  });
+
+  integrationsClose.addEventListener('click', closeIntegrationsDialog);
+  integrationsOverlay.addEventListener('click', (e) => {
+    if (e.target === integrationsOverlay) closeIntegrationsDialog();
+  });
+
+  function closeIntegrationsDialog() {
+    integrationsOverlay.classList.add('hidden');
+    selectedIntegrationId = null;
+  }
+
+  integrationForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = integrationName.value.trim();
+    const rootFolderName = integrationRoot.value.trim() || name;
+    const scopes = Array.from(document.querySelectorAll('input[name="integration-scope"]:checked')).map(el => el.value);
+    if (!name || !scopes.length) {
+      showToast('请输入应用名称并至少选择一个权限', 'error');
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API}/integrations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name, rootFolderName, scopes, createToken: true }),
+      });
+      if (res.status === 401) { logout(); return; }
+      const data = await res.json();
+      if (!res.ok) { showToast(data.message, 'error'); return; }
+      integrationForm.reset();
+      document.querySelectorAll('input[name="integration-scope"]').forEach(el => {
+        el.checked = el.value !== 'files:delete';
+      });
+      showNewToken(data.token && data.token.token);
+      selectedIntegrationId = data.integration.id;
+      showToast('接入应用创建成功', 'success');
+      await loadIntegrations();
+      await loadIntegrationTokens(selectedIntegrationId);
+    } catch (err) {
+      showToast('创建接入应用失败', 'error');
+    }
+  });
+
+  copyTokenBtn.addEventListener('click', async () => {
+    const value = newTokenValue.textContent.trim();
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast('Token 已复制', 'success');
+    } catch (err) {
+      showToast('复制失败，请手动复制', 'error');
+    }
+  });
+
+  async function loadIntegrations() {
+    integrationsList.innerHTML = '<div class="tokens-empty">加载中...</div>';
+    try {
+      const res = await fetch(`${API}/integrations`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) { logout(); return; }
+      const data = await res.json();
+      if (!res.ok) { showToast(data.message, 'error'); return; }
+      integrations = data.integrations || [];
+      renderIntegrations();
+      if (selectedIntegrationId) loadIntegrationTokens(selectedIntegrationId);
+    } catch (err) {
+      integrationsList.innerHTML = '<div class="tokens-empty">加载失败</div>';
+    }
+  }
+
+  function renderIntegrations() {
+    if (!integrations.length) {
+      integrationsList.innerHTML = '<div class="tokens-empty">暂无接入应用</div>';
+      tokensPanel.innerHTML = '<div class="tokens-empty">创建应用后可管理 Token</div>';
+      return;
+    }
+
+    integrationsList.innerHTML = integrations.map(item => {
+      const scopes = formatScopes(item.scopes);
+      const active = String(item.id) === String(selectedIntegrationId) ? ' active' : '';
+      const enabled = Number(item.enabled) === 1;
+      return `
+        <div class="integration-item${active}" data-id="${item.id}">
+          <div class="integration-main">
+            <div class="integration-name">${escapeHtml(item.name)}</div>
+            <div class="integration-meta">根目录：${escapeHtml(item.root_folder_name || String(item.root_folder_id))}</div>
+            <div class="integration-scopes">${escapeHtml(scopes)}</div>
+          </div>
+          <div class="integration-actions">
+            <span class="integration-status ${enabled ? 'enabled' : 'disabled'}">${enabled ? '启用' : '禁用'}</span>
+            <button data-action="toggle" data-id="${item.id}" data-enabled="${enabled ? '1' : '0'}">${enabled ? '禁用' : '启用'}</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    integrationsList.querySelectorAll('.integration-item').forEach(el => {
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        selectedIntegrationId = el.dataset.id;
+        renderIntegrations();
+        loadIntegrationTokens(selectedIntegrationId);
+      });
+    });
+
+    integrationsList.querySelectorAll('button[data-action="toggle"]').forEach(btn => {
+      btn.addEventListener('click', () => toggleIntegration(btn.dataset.id, btn.dataset.enabled !== '1'));
+    });
+  }
+
+  async function toggleIntegration(id, enabled) {
+    try {
+      const res = await fetch(`${API}/integrations/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ enabled }),
+      });
+      if (res.status === 401) { logout(); return; }
+      const data = await res.json();
+      if (!res.ok) { showToast(data.message, 'error'); return; }
+      showToast(data.message, 'success');
+      await loadIntegrations();
+    } catch (err) {
+      showToast('更新接入应用失败', 'error');
+    }
+  }
+
+  async function loadIntegrationTokens(integrationId) {
+    tokensPanel.innerHTML = '<div class="tokens-empty">加载 Token...</div>';
+    try {
+      const res = await fetch(`${API}/integrations/${integrationId}/tokens`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) { logout(); return; }
+      const data = await res.json();
+      if (!res.ok) { showToast(data.message, 'error'); return; }
+      renderTokens(integrationId, data.tokens || []);
+    } catch (err) {
+      tokensPanel.innerHTML = '<div class="tokens-empty">Token 加载失败</div>';
+    }
+  }
+
+  function renderTokens(integrationId, tokens) {
+    const integration = integrations.find(item => String(item.id) === String(integrationId));
+    const allowedScopes = parseScopes(integration ? integration.scopes : '');
+    const scopeOptions = allowedScopes.map(scope => `
+      <label><input type="checkbox" name="token-scope" value="${escapeAttr(scope)}" checked> ${escapeHtml(scopeLabel(scope))}</label>
+    `).join('');
+
+    const tokenRows = tokens.length ? tokens.map(item => {
+      const revoked = Boolean(item.revoked_at);
+      return `
+        <div class="token-item">
+          <div>
+            <div class="token-name">${escapeHtml(item.name)}</div>
+            <div class="token-meta">权限：${escapeHtml(formatScopes(item.scopes))}</div>
+            <div class="token-meta">创建：${item.created_at || '-'}，最后使用：${item.last_used_at || '-'}</div>
+            ${revoked ? '<div class="token-revoked">已撤销</div>' : ''}
+          </div>
+          <button data-action="revoke-token" data-id="${item.id}" ${revoked ? 'disabled' : ''}>撤销</button>
+        </div>
+      `;
+    }).join('') : '<div class="tokens-empty">暂无 Token</div>';
+
+    tokensPanel.innerHTML = `
+      <div class="tokens-header">
+        <div>
+          <div class="tokens-title">${escapeHtml(integration ? integration.name : 'Token')}</div>
+          <div class="tokens-subtitle">Token 明文只在创建时显示</div>
+        </div>
+      </div>
+      <form id="token-form" class="token-form">
+        <input type="text" id="token-name" placeholder="Token 名称，例如 music-backend" value="default">
+        <div class="scope-row compact">${scopeOptions}</div>
+        <button type="submit">创建 Token</button>
+      </form>
+      <div class="token-list">${tokenRows}</div>
+    `;
+
+    const tokenForm = document.getElementById('token-form');
+    tokenForm.addEventListener('submit', (e) => createIntegrationToken(e, integrationId));
+    tokensPanel.querySelectorAll('button[data-action="revoke-token"]').forEach(btn => {
+      btn.addEventListener('click', () => revokeIntegrationToken(integrationId, btn.dataset.id));
+    });
+  }
+
+  async function createIntegrationToken(e, integrationId) {
+    e.preventDefault();
+    const name = document.getElementById('token-name').value.trim() || 'token';
+    const scopes = Array.from(tokensPanel.querySelectorAll('input[name="token-scope"]:checked')).map(el => el.value);
+    if (!scopes.length) {
+      showToast('请至少选择一个 Token 权限', 'error');
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API}/integrations/${integrationId}/tokens`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name, scopes }),
+      });
+      if (res.status === 401) { logout(); return; }
+      const data = await res.json();
+      if (!res.ok) { showToast(data.message, 'error'); return; }
+      showNewToken(data.token && data.token.token);
+      showToast('Token 创建成功', 'success');
+      await loadIntegrationTokens(integrationId);
+    } catch (err) {
+      showToast('创建 Token 失败', 'error');
+    }
+  }
+
+  async function revokeIntegrationToken(integrationId, tokenId) {
+    if (!confirm('确定撤销这个 API Token 吗？')) return;
+    try {
+      const res = await fetch(`${API}/integrations/${integrationId}/tokens/${tokenId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) { logout(); return; }
+      const data = await res.json();
+      if (!res.ok) { showToast(data.message, 'error'); return; }
+      showToast('Token 已撤销', 'success');
+      await loadIntegrationTokens(integrationId);
+    } catch (err) {
+      showToast('撤销 Token 失败', 'error');
+    }
+  }
+
+  function showNewToken(value) {
+    if (!value) return;
+    newTokenValue.textContent = value;
+    newTokenBox.classList.remove('hidden');
+  }
+
+  function parseScopes(scopes) {
+    return String(scopes || '').split(',').map(scope => scope.trim()).filter(Boolean);
+  }
+
+  function formatScopes(scopes) {
+    return parseScopes(scopes).map(scopeLabel).join('、') || '-';
+  }
+
+  function scopeLabel(scope) {
+    const labels = {
+      'files:upload': '上传/建目录',
+      'files:read': '读取列表',
+      'files:delete': '删除文件',
+      'links:create': '创建访问链接',
+    };
+    return labels[scope] || scope;
   }
 
   // ===== Preview =====

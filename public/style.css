@@ -539,6 +539,278 @@ body {
 
 .btn-move-confirm:hover { background: #5a6fd6; }
 
+/* ===== Integrations Dialog ===== */
+.integrations-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3500;
+  padding: 20px;
+}
+
+.integrations-dialog {
+  background: #fff;
+  border-radius: 10px;
+  width: min(980px, 100%);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.integrations-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid #eee;
+  font-weight: 600;
+}
+
+.integrations-body {
+  padding: 16px;
+  overflow: auto;
+}
+
+.integration-form {
+  border-bottom: 1px solid #eee;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+}
+
+.integration-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.integration-form input,
+.token-form input {
+  padding: 9px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.integration-form input:focus,
+.token-form input:focus {
+  outline: none;
+  border-color: #667eea;
+}
+
+.integration-form button,
+.token-form button,
+.integration-actions button,
+.token-item button,
+.new-token-box button {
+  padding: 8px 14px;
+  border: 1px solid #667eea;
+  border-radius: 6px;
+  background: #667eea;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.integration-actions button,
+.token-item button {
+  background: #fff;
+  color: #666;
+  border-color: #ddd;
+}
+
+.integration-actions button:hover,
+.token-item button:hover {
+  border-color: #667eea;
+  color: #667eea;
+}
+
+.token-item button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.scope-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 13px;
+  color: #555;
+}
+
+.scope-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.scope-row.compact {
+  gap: 10px;
+}
+
+.new-token-box {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  background: #fff8e1;
+  border: 1px solid #f1d58a;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 14px;
+}
+
+.new-token-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #8a6500;
+}
+
+.new-token-value {
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  color: #333;
+  background: #fff;
+  border: 1px solid #f1d58a;
+  border-radius: 6px;
+  padding: 8px;
+  overflow: auto;
+  white-space: nowrap;
+}
+
+.integrations-content {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) 1fr;
+  gap: 14px;
+  min-height: 360px;
+}
+
+.integrations-list,
+.tokens-panel {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  overflow: auto;
+  background: #fff;
+}
+
+.integration-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid #f1f1f1;
+  cursor: pointer;
+}
+
+.integration-item:hover,
+.integration-item.active {
+  background: #f5f7ff;
+}
+
+.integration-name,
+.tokens-title,
+.token-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #333;
+}
+
+.integration-meta,
+.integration-scopes,
+.tokens-subtitle,
+.token-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #777;
+}
+
+.integration-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.integration-status {
+  font-size: 12px;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.integration-status.enabled {
+  color: #1f7a3d;
+  background: #eaf8ef;
+}
+
+.integration-status.disabled {
+  color: #999;
+  background: #f0f0f0;
+}
+
+.tokens-header {
+  padding: 14px;
+  border-bottom: 1px solid #eee;
+}
+
+.token-form {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-bottom: 1px solid #eee;
+}
+
+.token-list {
+  padding: 0;
+}
+
+.token-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #f1f1f1;
+}
+
+.token-revoked {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #e74c3c;
+}
+
+.tokens-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: #999;
+  font-size: 13px;
+}
+
+@media (max-width: 760px) {
+  .toolbar {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .toolbar-right {
+    flex-wrap: wrap;
+  }
+
+  .integration-form-row,
+  .integrations-content,
+  .new-token-box {
+    grid-template-columns: 1fr;
+  }
+
+  .integrations-dialog {
+    max-height: 92vh;
+  }
+}
+
 /* ===== Toast ===== */
 .toast-container {
   position: fixed;

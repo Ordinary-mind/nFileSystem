@@ -4,7 +4,7 @@ services:
     container_name: nfilesystem
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "6001:3000"
     environment:
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       TOKEN_EXPIRES_IN: ${TOKEN_EXPIRES_IN:-30d}

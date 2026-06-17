@@ -448,6 +448,25 @@ app.post('/integrations/:id/tokens', authRequired, async (req, res) => {
   }
 });
 
+app.get('/integrations/:id/tokens', authRequired, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const integration = await get('SELECT id FROM integrations WHERE id = ? AND user_id = ?', [id, req.user.id]);
+    if (!integration) return res.status(404).json({ message: '接入应用不存在' });
+
+    const tokens = await all(
+      `SELECT id, name, scopes, expires_at, revoked_at, last_used_at, created_at
+       FROM api_tokens
+       WHERE integration_id = ? AND user_id = ?
+       ORDER BY id DESC`,
+      [id, req.user.id]
+    );
+    return res.json({ tokens });
+  } catch (err) {
+    return res.status(500).json({ message: '获取 API Token 失败', error: err.message });
+  }
+});
+
 app.put('/integrations/:id', authRequired, async (req, res) => {
   try {
     const { id } = req.params;

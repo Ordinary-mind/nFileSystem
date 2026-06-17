@@ -50,6 +50,7 @@
         <input type="text" id="search-input" placeholder="搜索..." class="search-input">
         <button id="new-folder-btn" class="btn-toolbar">📂 新建文件夹</button>
         <label class="upload-btn" for="file-input">⬆ 上传文件</label>
+        <button id="integrations-btn" class="btn-toolbar">接入应用</button>
         <input type="file" id="file-input" multiple hidden>
         <button id="logout-btn" class="btn-logout">退出</button>
       </div>
@@ -108,6 +109,41 @@
       </div>
     </div>
   </div>
+
+    <div id="integrations-overlay" class="integrations-overlay hidden">
+      <div class="integrations-dialog">
+        <div class="integrations-header">
+          <span>接入应用</span>
+          <button id="integrations-close" class="preview-close">x</button>
+        </div>
+        <div class="integrations-body">
+          <form id="integration-form" class="integration-form">
+            <div class="integration-form-row">
+              <input type="text" id="integration-name" placeholder="应用名称，例如 music-app" required>
+              <input type="text" id="integration-root" placeholder="根目录名称，默认同应用名">
+              <button type="submit">创建</button>
+            </div>
+            <div class="scope-row">
+              <label><input type="checkbox" name="integration-scope" value="files:upload" checked> 上传/建目录</label>
+              <label><input type="checkbox" name="integration-scope" value="files:read" checked> 读取列表</label>
+              <label><input type="checkbox" name="integration-scope" value="files:delete"> 删除文件</label>
+              <label><input type="checkbox" name="integration-scope" value="links:create" checked> 创建访问链接</label>
+            </div>
+          </form>
+          <div id="new-token-box" class="new-token-box hidden">
+            <div class="new-token-title">新 Token 只显示一次</div>
+            <div class="new-token-value" id="new-token-value"></div>
+            <button id="copy-token-btn" type="button">复制</button>
+          </div>
+          <div class="integrations-content">
+            <div id="integrations-list" class="integrations-list"></div>
+            <div id="tokens-panel" class="tokens-panel">
+              <div class="tokens-empty">选择一个应用查看 Token</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
   <div id="toast-container" class="toast-container"></div>
 
