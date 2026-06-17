@@ -76,10 +76,16 @@ npm start
 
 ### 环境变量
 
+本地环境变量文件不应提交到源代码仓库。首次部署可复制模板：
+
+```bash
+cp .env.example .env
+```
+
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `PORT` | 服务端口 | `6001` |
-| `JWT_SECRET` | JWT 签名密钥（**生产环境必须修改**） | 无（必填） |
+| `JWT_SECRET` | JWT 签名密钥，不配置服务会拒绝启动 | 无（必填） |
 | `TOKEN_EXPIRES_IN` | Token 有效期 | 开发 `7d` / 生产 `2h` |
 | `ALLOW_REGISTER` | 是否允许注册 | `false` |
 
@@ -108,7 +114,7 @@ services:
     ports:
       - "6001:3000"
     environment:
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       TOKEN_EXPIRES_IN: ${TOKEN_EXPIRES_IN:-30d}
       ALLOW_REGISTER: ${ALLOW_REGISTER:-false}
     volumes:

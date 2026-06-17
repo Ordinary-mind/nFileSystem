@@ -13,6 +13,7 @@ yarn-error.log*
 pnpm-debug.log*
 
 # 环境变量文件（非源码）
+.env
 !.env.example
 
 # 构建/测试产物（非源码）

@@ -6,7 +6,7 @@ services:
     ports:
       - "6001:3000"
     environment:
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       TOKEN_EXPIRES_IN: ${TOKEN_EXPIRES_IN:-30d}
       ALLOW_REGISTER: ${ALLOW_REGISTER:-false}
     volumes:
