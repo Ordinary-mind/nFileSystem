@@ -112,44 +112,44 @@ async function initDb() {
 
   await run(`
     CREATE TABLE IF NOT EXISTS integrations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      name TEXT NOT NULL,
-      root_folder_id INTEGER NOT NULL,
-      scopes TEXT NOT NULL,
-      enabled INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+      id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- 接入应用 ID
+      user_id INTEGER NOT NULL,                                -- 所属用户 ID
+      name TEXT NOT NULL,                                      -- 接入应用名称
+      root_folder_id INTEGER NOT NULL,                         -- 应用隔离根目录 ID
+      scopes TEXT NOT NULL,                                    -- 应用允许的权限，逗号分隔
+      enabled INTEGER DEFAULT 1,                               -- 是否启用，1=启用，0=禁用
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))   -- 创建时间
     )
   `);
 
   await run(`
     CREATE TABLE IF NOT EXISTS api_tokens (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      integration_id INTEGER NOT NULL,
-      user_id INTEGER NOT NULL,
-      name TEXT NOT NULL,
-      token_hash TEXT NOT NULL UNIQUE,
-      scopes TEXT NOT NULL,
-      expires_at TEXT,
-      revoked_at TEXT,
-      last_used_at TEXT,
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+      id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- API Token ID
+      integration_id INTEGER NOT NULL,                         -- 所属接入应用 ID
+      user_id INTEGER NOT NULL,                                -- 所属用户 ID
+      name TEXT NOT NULL,                                      -- Token 名称，同一应用下唯一
+      token_hash TEXT NOT NULL UNIQUE,                         -- Token 明文的 SHA-256 哈希
+      scopes TEXT NOT NULL,                                    -- Token 权限，必须是应用权限的子集
+      expires_at TEXT,                                         -- 过期时间，null=不过期
+      revoked_at TEXT,                                         -- 撤销时间，兼容历史软撤销数据
+      last_used_at TEXT,                                       -- 最后使用时间
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))   -- 创建时间
     )
   `);
 
   await run(`
     CREATE TABLE IF NOT EXISTS access_links (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      integration_id INTEGER NOT NULL,
-      user_file_id INTEGER NOT NULL,
-      token_hash TEXT NOT NULL UNIQUE,
-      disposition TEXT DEFAULT 'inline',
-      expires_at TEXT,
-      max_uses INTEGER,
-      use_count INTEGER DEFAULT 0,
-      revoked_at TEXT,
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+      id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- 访问链接 ID
+      user_id INTEGER NOT NULL,                                -- 所属用户 ID
+      integration_id INTEGER NOT NULL,                         -- 创建链接的接入应用 ID
+      user_file_id INTEGER NOT NULL,                           -- 关联的用户文件引用 ID
+      token_hash TEXT NOT NULL UNIQUE,                         -- 访问链接 token 的 SHA-256 哈希
+      disposition TEXT DEFAULT 'inline',                       -- 打开方式：inline=浏览器预览/播放，download=附件下载
+      expires_at TEXT,                                         -- 过期时间，null=不过期
+      max_uses INTEGER,                                        -- 最大访问次数，null=不限次数
+      use_count INTEGER DEFAULT 0,                             -- 已访问次数
+      revoked_at TEXT,                                         -- 撤销时间，null=未撤销
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))   -- 创建时间
     )
   `);
 
