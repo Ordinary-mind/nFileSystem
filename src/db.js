@@ -161,6 +161,16 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_integrations_user ON integrations(user_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id, integration_id)');
+  await run(`
+    UPDATE api_tokens
+    SET name = name || '-' || id
+    WHERE id NOT IN (
+      SELECT MIN(id)
+      FROM api_tokens
+      GROUP BY integration_id, name
+    )
+  `);
+  await run('CREATE UNIQUE INDEX IF NOT EXISTS idx_api_tokens_integration_name ON api_tokens(integration_id, name)');
   await run('CREATE INDEX IF NOT EXISTS idx_access_links_token ON access_links(token_hash)');
   await run('CREATE INDEX IF NOT EXISTS idx_access_links_file ON access_links(user_file_id)');
 }

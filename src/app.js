@@ -345,6 +345,12 @@ function parseScopesForRoute(scopes) {
     .filter(Boolean);
 }
 
+function normalizeTokenName(name) {
+  const value = String(name || '').trim();
+  if (!value || value.length > 64) return null;
+  return value;
+}
+
 app.get('/integrations', authRequired, async (req, res) => {
   try {
     const integrations = await all(
@@ -431,7 +437,15 @@ app.post('/integrations/:id/tokens', authRequired, async (req, res) => {
     const integration = await get('SELECT id, scopes FROM integrations WHERE id = ? AND user_id = ?', [id, req.user.id]);
     if (!integration) return res.status(404).json({ message: '接入应用不存在' });
 
-    const { name = 'token', scopes, expiresInSeconds } = req.body;
+    const { scopes, expiresInSeconds } = req.body;
+    const name = normalizeTokenName(req.body.name);
+    if (!name) return res.status(400).json({ message: 'API Token 名称不能为空，且不能超过 64 个字符' });
+    const sameName = await get(
+      'SELECT id FROM api_tokens WHERE integration_id = ? AND user_id = ? AND name = ?',
+      [id, req.user.id, name]
+    );
+    if (sameName) return res.status(409).json({ message: '同一接入应用下已存在同名 API Token' });
+
     const allowedScopes = parseScopesForRoute(integration.scopes);
     const requestedScopes = scopes ? parseScopesForRoute(normalizeScopes(scopes, [])) : allowedScopes;
     const finalScopes = requestedScopes.filter((scope) => allowedScopes.includes(scope));
@@ -467,6 +481,41 @@ app.get('/integrations/:id/tokens', authRequired, async (req, res) => {
   }
 });
 
+app.put('/integrations/:integrationId/tokens/:tokenId', authRequired, async (req, res) => {
+  try {
+    const { integrationId, tokenId } = req.params;
+    const integration = await get('SELECT id, scopes FROM integrations WHERE id = ? AND user_id = ?', [integrationId, req.user.id]);
+    if (!integration) return res.status(404).json({ message: '接入应用不存在' });
+
+    const tokenRecord = await get(
+      'SELECT id FROM api_tokens WHERE id = ? AND integration_id = ? AND user_id = ?',
+      [tokenId, integrationId, req.user.id]
+    );
+    if (!tokenRecord) return res.status(404).json({ message: 'API Token 不存在' });
+
+    const name = normalizeTokenName(req.body.name);
+    if (!name) return res.status(400).json({ message: 'API Token 名称不能为空，且不能超过 64 个字符' });
+    const sameName = await get(
+      'SELECT id FROM api_tokens WHERE integration_id = ? AND user_id = ? AND name = ? AND id != ?',
+      [integrationId, req.user.id, name, tokenId]
+    );
+    if (sameName) return res.status(409).json({ message: '同一接入应用下已存在同名 API Token' });
+
+    const allowedScopes = parseScopesForRoute(integration.scopes);
+    const requestedScopes = req.body.scopes ? parseScopesForRoute(normalizeScopes(req.body.scopes, [])) : allowedScopes;
+    const finalScopes = requestedScopes.filter((scope) => allowedScopes.includes(scope));
+    if (!finalScopes.length) return res.status(400).json({ message: 'API Token 权限不能为空' });
+
+    await run(
+      'UPDATE api_tokens SET name = ?, scopes = ?, expires_at = ? WHERE id = ? AND integration_id = ? AND user_id = ?',
+      [name, finalScopes.join(','), toExpiresAt(req.body.expiresInSeconds), tokenId, integrationId, req.user.id]
+    );
+    return res.json({ message: 'API Token 已更新', token: { id: Number(tokenId), name, scopes: finalScopes } });
+  } catch (err) {
+    return res.status(500).json({ message: '更新 API Token 失败', error: err.message });
+  }
+});
+
 app.put('/integrations/:id', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
@@ -486,8 +535,7 @@ app.delete('/integrations/:integrationId/tokens/:tokenId', authRequired, async (
   try {
     const { integrationId, tokenId } = req.params;
     const result = await run(
-      `UPDATE api_tokens SET revoked_at = datetime('now', 'localtime')
-       WHERE id = ? AND integration_id = ? AND user_id = ? AND revoked_at IS NULL`,
+      'DELETE FROM api_tokens WHERE id = ? AND integration_id = ? AND user_id = ?',
       [tokenId, integrationId, req.user.id]
     );
     if (!result.changes) return res.status(404).json({ message: 'API Token 不存在或已撤销' });

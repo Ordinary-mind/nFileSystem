@@ -777,6 +777,13 @@ body {
   border-bottom: 1px solid #f1f1f1;
 }
 
+.token-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .token-revoked {
   margin-top: 4px;
   font-size: 12px;
