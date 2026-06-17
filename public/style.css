@@ -754,8 +754,28 @@ body {
 }
 
 .tokens-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 14px;
   border-bottom: 1px solid #eee;
+}
+
+.tokens-header button {
+  padding: 7px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fff;
+  color: #666;
+  font-size: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.tokens-header button:hover {
+  border-color: #667eea;
+  color: #667eea;
 }
 
 .token-form {

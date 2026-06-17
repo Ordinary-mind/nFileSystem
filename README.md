@@ -11,6 +11,8 @@
 - **秒传**：客户端计算 MD5，已存在的文件无需重复上传
 - **批量上传**：单次最多 20 个文件，单文件最大 50MB，带进度条
 - **文件预览**：支持图片和文本类文件在线预览
+- **接入应用**：支持为外部系统创建独立接入应用、API Token 和应用隔离目录
+- **访问链接**：支持为文件生成无需登录的访问链接，可用于音频、歌词、封面、地图文件等外部访问场景
 - **操作日志**：记录所有关键操作（登录、上传、删除等），含 IP 和 User-Agent
 - **安全防护**：登录限流（同 IP 每分钟 10 次）、注册开关控制、文件访问权限隔离
 - **Docker 部署**：开箱即用的容器化方案
@@ -70,13 +72,13 @@ npm run dev
 npm start
 ```
 
-服务默认监听 `http://localhost:3000`
+服务默认监听 `http://localhost:6001`
 
 ### 环境变量
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `PORT` | 服务端口 | `3000` |
+| `PORT` | 服务端口 | `6001` |
 | `JWT_SECRET` | JWT 签名密钥（**生产环境必须修改**） | 无（必填） |
 | `TOKEN_EXPIRES_IN` | Token 有效期 | 开发 `7d` / 生产 `2h` |
 | `ALLOW_REGISTER` | 是否允许注册 | `false` |
@@ -104,7 +106,7 @@ services:
     container_name: nfilesystem
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "6001:3000"
     environment:
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       TOKEN_EXPIRES_IN: ${TOKEN_EXPIRES_IN:-30d}
@@ -159,12 +161,60 @@ docker compose up -d
 
 > 所有需鉴权接口需在请求头携带 `Authorization: Bearer <token>`
 
+### 接入应用管理接口（需登录 JWT）
+
+这些接口用于在前端“接入应用”管理页维护外部系统接入能力。登录用户可以为音乐 App、地图服务、文档系统等创建独立应用，每个应用绑定一个根目录和一组权限。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/integrations` | 获取当前用户的接入应用列表 |
+| POST | `/integrations` | 创建接入应用，可自动创建默认 API Token |
+| PUT | `/integrations/:id` | 启用或禁用接入应用 |
+| GET | `/integrations/:id/tokens` | 获取应用下的 API Token 列表（不返回明文 token） |
+| POST | `/integrations/:id/tokens` | 创建 API Token，明文 token 只返回一次 |
+| PUT | `/integrations/:integrationId/tokens/:tokenId` | 编辑 API Token 名称和权限 |
+| DELETE | `/integrations/:integrationId/tokens/:tokenId` | 删除 API Token |
+
+API Token 权限：
+
+| 权限 | 说明 |
+|------|------|
+| `files:upload` | 上传文件、创建文件夹 |
+| `files:read` | 读取应用根目录内的文件和文件夹列表 |
+| `files:delete` | 删除应用根目录内的文件引用 |
+| `links:create` | 创建文件访问链接 |
+
+### 应用接入 API（需 API Token）
+
+这些接口给外部系统后端调用。API Token 只能访问所属接入应用绑定的根目录及其子目录，不能访问用户网盘中的其它目录。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/files` | 获取应用目录内容，支持 `folderId` 查询参数 |
+| POST | `/api/v1/folders` | 在应用根目录或子目录下创建文件夹 |
+| POST | `/api/v1/files/upload` | 上传文件到应用目录，字段名 `files` |
+| POST | `/api/v1/files/:id/access-links` | 为指定文件创建访问链接 |
+| DELETE | `/api/v1/files/:id` | 删除应用目录内的文件引用 |
+
+应用 API 请求头：
+
+```http
+Authorization: Bearer <api-token>
+```
+
+### 访问链接接口（无需登录）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/n_file_system_api/access/:token` | 通过访问链接读取文件，支持 inline 预览/播放或 download 下载 |
+| GET | `/access/:token` | 旧版兼容入口，不建议新接入继续使用 |
+
 ### 请求示例
 
 **登录：**
 
 ```bash
-curl -X POST http://localhost:3000/auth/login \
+curl -X POST http://localhost:6001/auth/login \
   -H "Content-Type: application/json" \
   -d '{"name": "alice", "password": "123456"}'
 ```
@@ -172,10 +222,62 @@ curl -X POST http://localhost:3000/auth/login \
 **上传文件：**
 
 ```bash
-curl -X POST http://localhost:3000/files/upload \
+curl -X POST http://localhost:6001/files/upload \
   -H "Authorization: Bearer <token>" \
   -F "files=@/path/to/file.pdf" \
   -F "folderId="
+```
+
+**创建接入应用：**
+
+```bash
+curl -X POST http://localhost:6001/integrations \
+  -H "Authorization: Bearer <login-jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "music-app",
+    "rootFolderName": "music-app",
+    "scopes": ["files:upload", "files:read", "links:create"],
+    "createToken": true
+  }'
+```
+
+返回的 `token.token` 是 API Token 明文，只显示一次，应保存在接入系统后端，不应放在前端页面或移动端安装包中。
+
+**应用上传文件并直接创建访问链接：**
+
+```bash
+curl -X POST http://localhost:6001/api/v1/files/upload \
+  -H "Authorization: Bearer <api-token>" \
+  -F "files=@/path/to/song.mp3" \
+  -F "withAccessLink=true" \
+  -F "disposition=inline"
+```
+
+返回示例：
+
+```json
+{
+  "message": "上传成功",
+  "files": [
+    {
+      "id": 123,
+      "name": "song.mp3",
+      "md5": "e10adc3949ba59abbe56e057f20f883e",
+      "accessLink": {
+        "path": "/n_file_system_api/access/nfs_al_xxx",
+        "expiresAt": null,
+        "disposition": "inline"
+      }
+    }
+  ]
+}
+```
+
+`accessLink.path` 是相对路径，不绑定文件服务所在域名、主机或端口。`/n_file_system_api` 是文件服务对外访问前缀，接入方可以按自己的网关或反向代理规则拼接完整地址，例如：
+
+```text
+https://music.example.com + /n_file_system_api/access/nfs_al_xxx
 ```
 
 ## 数据库设计
@@ -234,6 +336,51 @@ curl -X POST http://localhost:3000/files/upload \
 | ip | TEXT | 客户端 IP |
 | user_agent | TEXT | 浏览器 UA |
 | created_at | TEXT | 记录时间 |
+
+### integrations（接入应用表）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| user_id | INTEGER | 所属用户 |
+| name | TEXT | 接入应用名称 |
+| root_folder_id | INTEGER | 应用隔离根目录 |
+| scopes | TEXT | 应用允许的权限，逗号分隔 |
+| enabled | INTEGER | 是否启用 |
+| created_at | TEXT | 创建时间 |
+
+### api_tokens（API Token 表）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| integration_id | INTEGER | 所属接入应用 |
+| user_id | INTEGER | 所属用户 |
+| name | TEXT | Token 名称，同一应用下唯一 |
+| token_hash | TEXT | API Token 的 SHA-256 哈希 |
+| scopes | TEXT | Token 权限，必须是应用权限的子集 |
+| expires_at | TEXT | 过期时间 |
+| revoked_at | TEXT | 撤销时间（兼容历史数据） |
+| last_used_at | TEXT | 最后使用时间 |
+| created_at | TEXT | 创建时间 |
+
+> API Token 明文只在创建时返回一次，数据库只保存哈希。
+
+### access_links（访问链接表）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| user_id | INTEGER | 所属用户 |
+| integration_id | INTEGER | 创建链接的接入应用 |
+| user_file_id | INTEGER | 关联的用户文件引用 |
+| token_hash | TEXT | 访问链接 token 的 SHA-256 哈希 |
+| disposition | TEXT | `inline` 或 `download` |
+| expires_at | TEXT | 过期时间 |
+| max_uses | INTEGER | 最大访问次数 |
+| use_count | INTEGER | 已访问次数 |
+| revoked_at | TEXT | 撤销时间 |
+| created_at | TEXT | 创建时间 |
 
 ## 存储规则
 

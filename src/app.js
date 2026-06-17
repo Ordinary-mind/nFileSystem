@@ -122,10 +122,6 @@ function toExpiresAt(expiresInSeconds) {
   return new Date(Date.now() + seconds * 1000).toISOString();
 }
 
-function buildPublicUrl(req, pathname) {
-  return `${req.protocol}://${req.get('host')}${pathname}`;
-}
-
 async function isFolderInsideRoot(folderId, rootFolderId, userId) {
   let currentId = folderId;
   while (currentId) {
@@ -189,7 +185,7 @@ async function saveUploadedFileReference(file, userId, folderId) {
   return { id: ufResult.lastID, name: file.originalname, md5: archived.md5, size: archived.size, mimeType: archived.mimeType, duplicate: false };
 }
 
-async function createAccessLink({ req, userId, integrationId, userFileId, expiresInSeconds, maxUses, disposition = 'inline' }) {
+async function createAccessLink({ userId, integrationId, userFileId, expiresInSeconds, maxUses, disposition = 'inline' }) {
   const token = randomToken('nfs_al');
   const expiresAt = toExpiresAt(expiresInSeconds);
   const normalizedDisposition = disposition === 'download' ? 'download' : 'inline';
@@ -201,9 +197,10 @@ async function createAccessLink({ req, userId, integrationId, userFileId, expire
     [userId, integrationId, userFileId, hashApiToken(token), normalizedDisposition, expiresAt, normalizedMaxUses]
   );
 
+  const accessPath = `/n_file_system_api/access/${token}`;
   return {
     id: result.lastID,
-    url: buildPublicUrl(req, `/access/${token}`),
+    path: accessPath,
     expiresAt,
     maxUses: normalizedMaxUses,
     disposition: normalizedDisposition,
@@ -1012,7 +1009,7 @@ app.delete('/api/v1/files/:id', apiTokenRequired(['files:delete']), async (req, 
   }
 });
 
-app.get('/access/:token', async (req, res) => {
+async function serveAccessLink(req, res) {
   try {
     const { token } = req.params;
     const link = await get(
@@ -1047,7 +1044,10 @@ app.get('/access/:token', async (req, res) => {
   } catch (err) {
     return res.status(500).json({ message: '访问文件失败', error: err.message });
   }
-});
+}
+
+app.get('/n_file_system_api/access/:token', serveAccessLink);
+app.get('/access/:token', serveAccessLink);
 
 app.get('/files/:md5/download', authRequired, async (req, res) => {
   try {

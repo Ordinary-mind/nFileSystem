@@ -539,6 +539,7 @@
   // ===== Integrations =====
   let integrations = [];
   let selectedIntegrationId = null;
+  let editingTokenId = null;
 
   integrationsBtn.addEventListener('click', () => {
     integrationsOverlay.classList.remove('hidden');
@@ -708,7 +709,7 @@
           </div>
           <div class="token-actions">
             <button data-action="edit-token" data-id="${item.id}" data-name="${escapeAttr(item.name)}" data-scopes="${escapeAttr(item.scopes)}">编辑</button>
-            <button data-action="delete-token" data-id="${item.id}" ${revoked ? 'disabled' : ''}>删除</button>
+            <button data-action="delete-token" data-id="${item.id}">删除</button>
           </div>
         </div>
       `;
@@ -720,26 +721,29 @@
           <div class="tokens-title">${escapeHtml(integration ? integration.name : 'Token')}</div>
           <div class="tokens-subtitle">Token 明文只在创建时显示</div>
         </div>
+        <button id="new-token-btn" type="button">新建 Token</button>
       </div>
       <form id="token-form" class="token-form">
         <input type="text" id="token-name" placeholder="Token 名称，例如 music-backend" required>
         <div class="scope-row compact">${scopeOptions}</div>
-        <button type="submit">创建 Token</button>
+        <button id="token-submit-btn" type="submit">创建 Token</button>
       </form>
       <div class="token-list">${tokenRows}</div>
     `;
 
     const tokenForm = document.getElementById('token-form');
-    tokenForm.addEventListener('submit', (e) => createIntegrationToken(e, integrationId));
+    const newTokenBtn = document.getElementById('new-token-btn');
+    tokenForm.addEventListener('submit', (e) => submitTokenForm(e, integrationId));
+    newTokenBtn.addEventListener('click', resetTokenForm);
     tokensPanel.querySelectorAll('button[data-action="edit-token"]').forEach(btn => {
-      btn.addEventListener('click', () => editIntegrationToken(integrationId, btn.dataset.id, btn.dataset.name, btn.dataset.scopes));
+      btn.addEventListener('click', () => fillTokenFormForEdit(btn.dataset.id, btn.dataset.name, btn.dataset.scopes));
     });
     tokensPanel.querySelectorAll('button[data-action="delete-token"]').forEach(btn => {
       btn.addEventListener('click', () => deleteIntegrationToken(integrationId, btn.dataset.id));
     });
   }
 
-  async function createIntegrationToken(e, integrationId) {
+  async function submitTokenForm(e, integrationId) {
     e.preventDefault();
     const name = document.getElementById('token-name').value.trim();
     const scopes = Array.from(tokensPanel.querySelectorAll('input[name="token-scope"]:checked')).map(el => el.value);
@@ -749,6 +753,11 @@
     }
     if (!scopes.length) {
       showToast('请至少选择一个 Token 权限', 'error');
+      return;
+    }
+
+    if (editingTokenId) {
+      await updateIntegrationToken(integrationId, editingTokenId, name, scopes);
       return;
     }
 
@@ -763,40 +772,46 @@
       if (!res.ok) { showToast(data.message, 'error'); return; }
       showNewToken(data.token && data.token.token);
       showToast('Token 创建成功', 'success');
+      resetTokenForm();
       await loadIntegrationTokens(integrationId);
     } catch (err) {
       showToast('创建 Token 失败', 'error');
     }
   }
 
-  async function editIntegrationToken(integrationId, tokenId, oldName, oldScopes) {
-    const name = prompt('请输入新的 API Token 名称：', oldName || '');
-    if (!name || !name.trim()) return;
+  function fillTokenFormForEdit(tokenId, name, scopes) {
+    editingTokenId = tokenId;
+    document.getElementById('token-name').value = name || '';
+    const currentScopes = new Set(parseScopes(scopes));
+    tokensPanel.querySelectorAll('input[name="token-scope"]').forEach(el => {
+      el.checked = currentScopes.has(el.value);
+    });
+    document.getElementById('token-submit-btn').textContent = '保存 Token';
+  }
 
-    const integration = integrations.find(item => String(item.id) === String(integrationId));
-    const allowedScopes = parseScopes(integration ? integration.scopes : '');
-    const currentScopes = new Set(parseScopes(oldScopes));
-    const selectedScopes = [];
-    for (const scope of allowedScopes) {
-      if (confirm(`Token 是否启用权限「${scopeLabel(scope)}」？\n当前：${currentScopes.has(scope) ? '已启用' : '未启用'}`)) {
-        selectedScopes.push(scope);
-      }
-    }
-    if (!selectedScopes.length) {
-      showToast('API Token 权限不能为空', 'error');
-      return;
-    }
+  function resetTokenForm() {
+    editingTokenId = null;
+    const nameInput = document.getElementById('token-name');
+    const submitBtn = document.getElementById('token-submit-btn');
+    if (nameInput) nameInput.value = '';
+    tokensPanel.querySelectorAll('input[name="token-scope"]').forEach(el => {
+      el.checked = true;
+    });
+    if (submitBtn) submitBtn.textContent = '创建 Token';
+  }
 
+  async function updateIntegrationToken(integrationId, tokenId, name, scopes) {
     try {
       const res = await fetch(`${API}/integrations/${integrationId}/tokens/${tokenId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ name: name.trim(), scopes: selectedScopes }),
+        body: JSON.stringify({ name, scopes }),
       });
       if (res.status === 401) { logout(); return; }
       const data = await res.json();
       if (!res.ok) { showToast(data.message, 'error'); return; }
       showToast('Token 已更新', 'success');
+      resetTokenForm();
       await loadIntegrationTokens(integrationId);
     } catch (err) {
       showToast('更新 Token 失败', 'error');
