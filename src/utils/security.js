@@ -2,10 +2,14 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  // eslint-disable-next-line no-console
-  console.error('错误: 必须设置环境变量 JWT_SECRET');
-  process.exit(1);
+const weakSecrets = new Set([
+  'secret',
+  'your-secret-key',
+  'change-me-in-production',
+  'my-dev-secret-change-in-production',
+]);
+if (!JWT_SECRET || Buffer.byteLength(JWT_SECRET, 'utf8') < 32 || weakSecrets.has(JWT_SECRET)) {
+  throw new Error('JWT_SECRET 必须是至少 32 字节的非默认随机字符串');
 }
 
 const SALT_ROUNDS = 10;
@@ -30,14 +34,14 @@ async function comparePassword(password, hash) {
  */
 function signToken(payload) {
   const expiresIn = process.env.TOKEN_EXPIRES_IN || (process.env.NODE_ENV === 'production' ? '2h' : '7d');
-  return jwt.sign(payload, JWT_SECRET, { expiresIn });
+  return jwt.sign(payload, JWT_SECRET, { expiresIn, algorithm: 'HS256' });
 }
 
 /**
  * 校验 token
  */
 function verifyToken(token) {
-  return jwt.verify(token, JWT_SECRET);
+  return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
 }
 
 module.exports = {

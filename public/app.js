@@ -5,6 +5,12 @@
   let token = localStorage.getItem('token') || '';
   let userName = localStorage.getItem('userName') || '';
   let currentFolderId = null;
+  let driveFolders = [];
+  let driveFiles = [];
+  let driveOffset = 0;
+  let driveSearch = '';
+  let driveRequestId = 0;
+  let currentPreviewUrl = null;
 
   // DOM refs
   const authPage = document.getElementById('auth-page');
@@ -114,7 +120,7 @@
     const password = document.getElementById('reg-password').value;
     const password2 = document.getElementById('reg-password2').value;
     if (password !== password2) { showMessage('两次密码不一致', 'error'); return; }
-    if (password.length < 6) { showMessage('密码至少 6 位', 'error'); return; }
+    if (password.length < 8) { showMessage('密码至少 8 位', 'error'); return; }
 
     try {
       const res = await fetch(`${API}/auth/register`, {
@@ -161,19 +167,33 @@
     searchTimer = setTimeout(() => loadDrive(searchInput.value.trim()), 300);
   });
 
-  async function loadDrive(search) {
+  async function loadDrive(search = '', append = false) {
+    if (!append) {
+      driveFolders = [];
+      driveFiles = [];
+      driveOffset = 0;
+      driveSearch = search;
+    }
+    const requestId = ++driveRequestId;
     try {
       let url = `${API}/drive?`;
       if (currentFolderId) url += `folderId=${currentFolderId}&`;
-      if (search) url += `name=${encodeURIComponent(search)}`;
+      if (driveSearch) url += `name=${encodeURIComponent(driveSearch)}&`;
+      url += `offset=${driveOffset}`;
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.status === 401) { logout(); return; }
       const data = await res.json();
+      if (!res.ok) throw new Error(data.message || '加载失败');
+      if (requestId !== driveRequestId) return;
+      driveFolders = append ? driveFolders.concat(data.folders || []) : (data.folders || []);
+      driveFiles = append ? driveFiles.concat(data.files || []) : (data.files || []);
+      driveOffset += (data.page && data.page.limit) || 200;
       renderBreadcrumb(data.breadcrumb || []);
-      renderDrive(data.folders || [], data.files || []);
+      renderDrive(driveFolders, driveFiles, Boolean(data.page && data.page.hasMore));
     } catch (err) {
+      if (requestId !== driveRequestId) return;
       fileList.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div>加载失败</div>';
     }
   }
@@ -194,8 +214,8 @@
     });
   }
 
-  function renderDrive(folders, files) {
-    if (!folders.length && !files.length) {
+  function renderDrive(folders, files, hasMore = false) {
+    if (!folders.length && !files.length && !hasMore) {
       fileList.innerHTML = '<div class="empty-state"><div class="icon">📂</div>空文件夹，右键可新建文件夹</div>';
       return;
     }
@@ -207,28 +227,41 @@
         <div class="file-item folder" data-type="folder" data-id="${f.id}" data-name="${escapeAttr(f.name)}">
           <div class="col-name">
             <span class="file-icon">📁</span>
-            <span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+            <span class="file-name" title="${escapeAttr(f.name)}">${escapeHtml(f.name)}</span>
           </div>
           <div class="col-size">-</div>
           <div class="col-type">文件夹</div>
-          <div class="col-date">${f.created_at || '-'}</div>
+          <div class="col-date">${escapeHtml(f.created_at || '-')}</div>
         </div>`;
     }
 
     for (const f of files) {
       html += `
-        <div class="file-item" data-type="file" data-id="${f.id}" data-name="${escapeAttr(f.name)}" data-md5="${f.md5}">
+        <div class="file-item" data-type="file" data-id="${f.id}" data-name="${escapeAttr(f.name)}" data-md5="${escapeAttr(f.md5)}">
           <div class="col-name">
             <span class="file-icon">${getFileIcon(f.name)}</span>
-            <span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+            <span class="file-name" title="${escapeAttr(f.name)}">${escapeHtml(f.name)}</span>
           </div>
           <div class="col-size">${formatSize(f.size)}</div>
-          <div class="col-type">${getExtension(f.name)}</div>
-          <div class="col-date">${f.created_at || '-'}</div>
+          <div class="col-type">${escapeHtml(getExtension(f.name))}</div>
+          <div class="col-date">${escapeHtml(f.created_at || '-')}</div>
         </div>`;
     }
 
+    if (hasMore) {
+      html += '<div class="load-more"><button type="button" id="load-more-btn">加载更多</button></div>';
+    }
+
     fileList.innerHTML = html;
+
+    const loadMoreBtn = document.getElementById('load-more-btn');
+    if (loadMoreBtn) {
+      loadMoreBtn.addEventListener('click', () => {
+        loadMoreBtn.disabled = true;
+        loadMoreBtn.textContent = '加载中...';
+        loadDrive(driveSearch, true);
+      });
+    }
 
     // 双击文件夹进入
     fileList.querySelectorAll('.file-item.folder').forEach(el => {
@@ -429,7 +462,7 @@
         a.href = url;
         a.download = name;
         a.click();
-        URL.revokeObjectURL(url);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
       })
       .catch(() => showToast('下载失败', 'error'));
   }
@@ -476,7 +509,7 @@
 
   async function loadMoveFolders() {
     try {
-      let url = `${API}/drive?`;
+      let url = `${API}/drive?limit=500&`;
       if (moveCurrentFolderId) url += `folderId=${moveCurrentFolderId}`;
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
@@ -535,16 +568,23 @@
     if (imageExts.includes(ext)) {
       // 图片需要用 blob URL 展示（因为接口需要 token）
       fetch(`${API}/files/${md5}/download`, { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.blob())
+        .then(r => {
+          if (!r.ok) throw new Error('加载失败');
+          return r.blob();
+        })
         .then(blob => {
-          const url = URL.createObjectURL(blob);
-          previewContent.innerHTML = `<img src="${url}" alt="${escapeHtml(name)}">`;
+          if (currentPreviewUrl) URL.revokeObjectURL(currentPreviewUrl);
+          currentPreviewUrl = URL.createObjectURL(blob);
+          previewContent.innerHTML = `<img src="${currentPreviewUrl}" alt="${escapeAttr(name)}">`;
         })
         .catch(() => { previewContent.innerHTML = '<div class="no-preview">加载失败</div>'; });
     } else if (textExts.includes(ext)) {
       previewContent.innerHTML = '<div class="no-preview">加载中...</div>';
       fetch(`${API}/files/${md5}/download`, { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.text())
+        .then(r => {
+          if (!r.ok) throw new Error('加载失败');
+          return r.text();
+        })
         .then(text => { previewContent.innerHTML = `<pre>${escapeHtml(text)}</pre>`; })
         .catch(() => { previewContent.innerHTML = '<div class="no-preview">加载失败</div>'; });
     } else {
@@ -556,12 +596,16 @@
   previewClose.addEventListener('click', () => {
     previewOverlay.classList.add('hidden');
     previewContent.innerHTML = '';
+    if (currentPreviewUrl) URL.revokeObjectURL(currentPreviewUrl);
+    currentPreviewUrl = null;
   });
 
   previewOverlay.addEventListener('click', (e) => {
     if (e.target === previewOverlay) {
       previewOverlay.classList.add('hidden');
       previewContent.innerHTML = '';
+      if (currentPreviewUrl) URL.revokeObjectURL(currentPreviewUrl);
+      currentPreviewUrl = null;
     }
   });
 
@@ -621,6 +665,7 @@
 
       if (instantRes.status === 401) { logout(); return; }
       const instantData = await instantRes.json();
+      if (!instantRes.ok) throw new Error(instantData.message || '秒传检查失败');
 
       const failedMd5Set = new Set(
         (instantData.results || []).filter(r => !r.success).map(r => r.md5)

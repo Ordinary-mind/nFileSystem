@@ -26,11 +26,11 @@
       <form id="register-form" class="auth-form hidden">
         <input type="text" id="reg-name" placeholder="用户名" required autocomplete="username">
         <div class="password-field">
-          <input type="password" id="reg-password" placeholder="密码" required autocomplete="new-password">
+          <input type="password" id="reg-password" placeholder="密码" required minlength="8" autocomplete="new-password">
           <span class="eye-toggle" data-target="reg-password">👁️</span>
         </div>
         <div class="password-field">
-          <input type="password" id="reg-password2" placeholder="确认密码" required autocomplete="new-password">
+          <input type="password" id="reg-password2" placeholder="确认密码" required minlength="8" autocomplete="new-password">
           <span class="eye-toggle" data-target="reg-password2">👁️</span>
         </div>
         <button type="submit">注册</button>
