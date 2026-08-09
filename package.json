@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
-    "build:docker": "docker build -t n-file-system:latest . && docker save -o n-file-system.tar n-file-system:latest"
+    "build:docker": "docker build -t n-file-system:latest . && docker save -o n-file-system.tar n-file-system:latest",
+    "test": "node --test --test-concurrency=1",
+    "storage:check": "node scripts/storage-check.js",
+    "check": "node --check src/app.js && node --check src/db.js && node --check src/storage.js && node --check src/middleware/auth.js && node --check src/utils/security.js && node --check scripts/storage-check.js && node --check test/integration.test.js && node --check public/app.js"
   },
   "keywords": [
     "express",
@@ -21,10 +24,13 @@
     "dotenv": "^17.4.2",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
-    "multer": "^1.4.5-lts.1",
-    "sqlite3": "^5.1.7"
+    "multer": "^2.0.2",
+    "sqlite3": "^6.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

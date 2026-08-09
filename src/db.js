@@ -1,184 +1,371 @@
+
 const path = require('path');
 const fs = require('fs');
 const sqlite3 = require('sqlite3').verbose();
 
-const dataDir = path.join(__dirname, '..', 'data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
+const dataDir = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(__dirname, '..', 'data');
+fs.mkdirSync(dataDir, { recursive: true });
 
 const dbPath = path.join(dataDir, 'app.db');
 const db = new sqlite3.Database(dbPath);
+const busyTimeout = Number.parseInt(process.env.SQLITE_BUSY_TIMEOUT_MS || '5000', 10);
+db.configure('busyTimeout', Number.isFinite(busyTimeout) ? busyTimeout : 5000);
 
-/**
- * Promise 化 sqlite3#run
- */
-function run(sql, params = []) {
+let operationQueue = Promise.resolve();
+
+function enqueue(operation) {
+  const result = operationQueue.then(operation);
+  operationQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function rawRun(sql, params = []) {
   return new Promise((resolve, reject) => {
     db.run(sql, params, function onRun(err) {
       if (err) return reject(err);
-      resolve({ lastID: this.lastID, changes: this.changes });
+      return resolve({ lastID: this.lastID, changes: this.changes });
     });
   });
 }
 
-/**
- * Promise 化 sqlite3#get
- */
-function get(sql, params = []) {
+function rawGet(sql, params = []) {
   return new Promise((resolve, reject) => {
     db.get(sql, params, (err, row) => {
       if (err) return reject(err);
-      resolve(row);
+      return resolve(row);
     });
   });
 }
 
-/**
- * Promise 化 sqlite3#all
- */
-function all(sql, params = []) {
+function rawAll(sql, params = []) {
   return new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => {
       if (err) return reject(err);
-      resolve(rows);
+      return resolve(rows);
     });
   });
 }
 
-/**
- * 初始化数据库表
- */
+function rawExec(sql) {
+  return new Promise((resolve, reject) => {
+    db.exec(sql, (err) => {
+      if (err) return reject(err);
+      return resolve();
+    });
+  });
+}
+
+function run(sql, params = []) {
+  return enqueue(() => rawRun(sql, params));
+}
+
+function get(sql, params = []) {
+  return enqueue(() => rawGet(sql, params));
+}
+
+function all(sql, params = []) {
+  return enqueue(() => rawAll(sql, params));
+}
+
+function transaction(work) {
+  return enqueue(async () => {
+    await rawRun('BEGIN IMMEDIATE');
+    const tx = { run: rawRun, get: rawGet, all: rawAll };
+    try {
+      const value = await work(tx);
+      await rawRun('COMMIT');
+      return value;
+    } catch (err) {
+      try {
+        await rawRun('ROLLBACK');
+      } catch (rollbackErr) {
+        err.rollbackError = rollbackErr;
+      }
+      throw err;
+    }
+  });
+}
+
+async function addMissingFileColumns() {
+  const columns = await rawAll('PRAGMA table_info(files)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('sha256')) {
+    await rawRun('ALTER TABLE files ADD COLUMN sha256 TEXT');
+  }
+  if (!names.has('storage_key')) {
+    await rawRun('ALTER TABLE files ADD COLUMN storage_key TEXT');
+  }
+  await rawRun('UPDATE files SET storage_key = md5 WHERE storage_key IS NULL OR storage_key = ?', ['']);
+}
+
+async function createIntegrityTriggers() {
+  await rawExec(`
+    DROP TRIGGER IF EXISTS trg_folder_parent_insert;
+    DROP TRIGGER IF EXISTS trg_folder_parent_update;
+    DROP TRIGGER IF EXISTS trg_folder_cycle_update;
+    DROP TRIGGER IF EXISTS trg_folder_duplicate_insert;
+    DROP TRIGGER IF EXISTS trg_folder_duplicate_update;
+    DROP TRIGGER IF EXISTS trg_user_file_insert;
+    DROP TRIGGER IF EXISTS trg_user_file_update;
+    DROP TRIGGER IF EXISTS trg_user_file_duplicate_insert;
+    DROP TRIGGER IF EXISTS trg_user_file_duplicate_update;
+    DROP TRIGGER IF EXISTS trg_user_file_access_links_delete;
+
+    CREATE TRIGGER trg_folder_parent_insert
+    BEFORE INSERT ON user_folders
+    WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id)
+      OR (NEW.parent_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM user_folders
+        WHERE id = NEW.parent_id AND user_id = NEW.user_id
+      ))
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid folder parent');
+    END;
+
+    CREATE TRIGGER trg_folder_parent_update
+    BEFORE UPDATE OF parent_id, user_id ON user_folders
+    WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id)
+      OR (NEW.parent_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM user_folders
+        WHERE id = NEW.parent_id AND user_id = NEW.user_id
+      ))
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid folder parent');
+    END;
+
+    CREATE TRIGGER trg_folder_cycle_update
+    BEFORE UPDATE OF parent_id ON user_folders
+    WHEN NEW.parent_id IS NOT NULL
+    BEGIN
+      SELECT CASE WHEN EXISTS (
+        WITH RECURSIVE descendants(id) AS (
+          SELECT OLD.id
+          UNION
+          SELECT f.id
+          FROM user_folders f
+          JOIN descendants d ON f.parent_id = d.id
+          WHERE f.user_id = OLD.user_id
+        )
+        SELECT 1 FROM descendants WHERE id = NEW.parent_id
+      ) THEN RAISE(ABORT, 'folder cycle') END;
+    END;
+
+    CREATE TRIGGER trg_folder_duplicate_insert
+    BEFORE INSERT ON user_folders
+    WHEN EXISTS (
+      SELECT 1 FROM user_folders
+      WHERE user_id = NEW.user_id AND parent_id IS NEW.parent_id AND name = NEW.name
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'duplicate folder name');
+    END;
+
+    CREATE TRIGGER trg_folder_duplicate_update
+    BEFORE UPDATE OF parent_id, name, user_id ON user_folders
+    WHEN EXISTS (
+      SELECT 1 FROM user_folders
+      WHERE user_id = NEW.user_id AND parent_id IS NEW.parent_id
+        AND name = NEW.name AND id != OLD.id
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'duplicate folder name');
+    END;
+
+    CREATE TRIGGER trg_user_file_insert
+    BEFORE INSERT ON user_files
+    WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id)
+      OR NOT EXISTS (SELECT 1 FROM files WHERE id = NEW.file_id)
+      OR (NEW.folder_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM user_folders
+        WHERE id = NEW.folder_id AND user_id = NEW.user_id
+      ))
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid user file reference');
+    END;
+
+    CREATE TRIGGER trg_user_file_update
+    BEFORE UPDATE OF user_id, folder_id, file_id ON user_files
+    WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id)
+      OR NOT EXISTS (SELECT 1 FROM files WHERE id = NEW.file_id)
+      OR (NEW.folder_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM user_folders
+        WHERE id = NEW.folder_id AND user_id = NEW.user_id
+      ))
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid user file reference');
+    END;
+
+    CREATE TRIGGER trg_user_file_duplicate_insert
+    BEFORE INSERT ON user_files
+    WHEN EXISTS (
+      SELECT 1 FROM user_files
+      WHERE user_id = NEW.user_id AND folder_id IS NEW.folder_id
+        AND file_id = NEW.file_id AND name = NEW.name
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'duplicate user file');
+    END;
+
+    CREATE TRIGGER trg_user_file_duplicate_update
+    BEFORE UPDATE OF user_id, folder_id, file_id, name ON user_files
+    WHEN EXISTS (
+      SELECT 1 FROM user_files
+      WHERE user_id = NEW.user_id AND folder_id IS NEW.folder_id
+        AND file_id = NEW.file_id AND name = NEW.name AND id != OLD.id
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'duplicate user file');
+    END;
+
+    CREATE TRIGGER trg_user_file_access_links_delete
+    AFTER DELETE ON user_files
+    BEGIN
+      DELETE FROM access_links WHERE user_file_id = OLD.id;
+    END;
+  `);
+}
+
 async function initDb() {
-  // 用户表
-  await run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- 用户 ID
-      name TEXT NOT NULL UNIQUE,                               -- 用户名（唯一）
-      password TEXT NOT NULL,                                  -- 密码（bcrypt 哈希）
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))   -- 注册时间
-    )
-  `);
+  return enqueue(async () => {
+    await rawGet('PRAGMA journal_mode = WAL');
+    await rawRun('PRAGMA synchronous = FULL');
+    await rawRun('PRAGMA foreign_keys = ON');
 
-  // 文件物理存储表（按 MD5 去重，一个 MD5 只存一份物理文件）
-  await run(`
-    CREATE TABLE IF NOT EXISTS files (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- 文件 ID
-      stored_name TEXT NOT NULL,                               -- 存储文件名（md5 + 扩展名）
-      md5 TEXT NOT NULL UNIQUE,                                -- 文件 MD5（唯一标识）
-      size INTEGER NOT NULL,                                   -- 文件大小（字节）
-      mime_type TEXT,                                          -- MIME 类型
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))   -- 入库时间
-    )
-  `);
+    await rawRun('BEGIN IMMEDIATE');
+    try {
+      await rawExec(`
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL UNIQUE,
+          password TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
 
-  // 用户文件夹表（支持嵌套，parent_id 自引用）
-  await run(`
-    CREATE TABLE IF NOT EXISTS user_folders (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- 文件夹 ID
-      user_id INTEGER NOT NULL,                                -- 所属用户 ID
-      parent_id INTEGER DEFAULT NULL,                          -- 父文件夹 ID（null = 根目录）
-      name TEXT NOT NULL,                                      -- 文件夹名称
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))   -- 创建时间
-    )
-  `);
+        CREATE TABLE IF NOT EXISTS files (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          stored_name TEXT NOT NULL,
+          storage_key TEXT NOT NULL,
+          md5 TEXT NOT NULL UNIQUE,
+          sha256 TEXT,
+          size INTEGER NOT NULL CHECK (size >= 0),
+          mime_type TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
 
-  // 用户文件引用表（关联用户、文件夹、物理文件）
-  await run(`
-    CREATE TABLE IF NOT EXISTS user_files (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- 记录 ID
-      user_id INTEGER NOT NULL,                                -- 所属用户 ID
-      folder_id INTEGER DEFAULT NULL,                          -- 所在文件夹 ID（null = 根目录）
-      file_id INTEGER NOT NULL,                                -- 关联 files 表的物理文件 ID
-      name TEXT NOT NULL,                                      -- 用户自定义文件名（可重命名）
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))   -- 创建时间
-    )
-  `);
+        CREATE TABLE IF NOT EXISTS user_folders (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          parent_id INTEGER REFERENCES user_folders(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
 
-  // 操作日志表（通用日志，支持各类操作记录）
-  await run(`
-    CREATE TABLE IF NOT EXISTS logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- 日志 ID
-      user_id INTEGER,                                         -- 操作用户 ID（未登录时为 null）
-      action TEXT NOT NULL,                                    -- 操作类型：register/login/login_failed/upload/download/delete/rename/move/share/password_change
-      target_type TEXT,                                        -- 目标类型：user/file/folder
-      target_id INTEGER,                                       -- 目标 ID
-      detail TEXT,                                             -- 额外信息（JSON 格式，灵活扩展）
-      ip TEXT,                                                 -- 客户端公网 IP
-      user_agent TEXT,                                         -- 浏览器 User-Agent
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))   -- 记录时间
-    )
-  `);
+        CREATE TABLE IF NOT EXISTS user_files (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          folder_id INTEGER REFERENCES user_folders(id) ON DELETE CASCADE,
+          file_id INTEGER NOT NULL REFERENCES files(id),
+          name TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
 
-  await run(`
-    CREATE TABLE IF NOT EXISTS integrations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- 接入应用 ID
-      user_id INTEGER NOT NULL,                                -- 所属用户 ID
-      name TEXT NOT NULL,                                      -- 接入应用名称
-      root_folder_id INTEGER NOT NULL,                         -- 应用隔离根目录 ID
-      scopes TEXT NOT NULL,                                    -- 应用允许的权限，逗号分隔
-      enabled INTEGER DEFAULT 1,                               -- 是否启用，1=启用，0=禁用
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))   -- 创建时间
-    )
-  `);
+        CREATE TABLE IF NOT EXISTS logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER,
+          action TEXT NOT NULL,
+          target_type TEXT,
+          target_id INTEGER,
+          detail TEXT,
+          ip TEXT,
+          user_agent TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
 
-  await run(`
-    CREATE TABLE IF NOT EXISTS api_tokens (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- API Token ID
-      integration_id INTEGER NOT NULL,                         -- 所属接入应用 ID
-      user_id INTEGER NOT NULL,                                -- 所属用户 ID
-      name TEXT NOT NULL,                                      -- Token 名称，同一应用下唯一
-      token_hash TEXT NOT NULL UNIQUE,                         -- Token 明文的 SHA-256 哈希
-      scopes TEXT NOT NULL,                                    -- Token 权限，必须是应用权限的子集
-      expires_at TEXT,                                         -- 过期时间，null=不过期
-      revoked_at TEXT,                                         -- 撤销时间，兼容历史软撤销数据
-      last_used_at TEXT,                                       -- 最后使用时间
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))   -- 创建时间
-    )
-  `);
+        CREATE TABLE IF NOT EXISTS integrations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          root_folder_id INTEGER NOT NULL REFERENCES user_folders(id) ON DELETE RESTRICT,
+          scopes TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+          created_at TEXT DEFAULT (datetime('now'))
+        );
 
-  await run(`
-    CREATE TABLE IF NOT EXISTS access_links (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- 访问链接 ID
-      user_id INTEGER NOT NULL,                                -- 所属用户 ID
-      integration_id INTEGER NOT NULL,                         -- 创建链接的接入应用 ID
-      user_file_id INTEGER NOT NULL,                           -- 关联的用户文件引用 ID
-      token_hash TEXT NOT NULL UNIQUE,                         -- 访问链接 token 的 SHA-256 哈希
-      disposition TEXT DEFAULT 'inline',                       -- 打开方式：inline=浏览器预览/播放，download=附件下载
-      expires_at TEXT,                                         -- 过期时间，null=不过期
-      max_uses INTEGER,                                        -- 最大访问次数，null=不限次数
-      use_count INTEGER DEFAULT 0,                             -- 已访问次数
-      revoked_at TEXT,                                         -- 撤销时间，null=未撤销
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))   -- 创建时间
-    )
-  `);
+        CREATE TABLE IF NOT EXISTS api_tokens (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          integration_id INTEGER NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          token_hash TEXT NOT NULL UNIQUE,
+          scopes TEXT NOT NULL,
+          expires_at TEXT,
+          revoked_at TEXT,
+          last_used_at TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
 
-  await run('CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5)');
-  await run('CREATE INDEX IF NOT EXISTS idx_user_folders_user ON user_folders(user_id, parent_id)');
-  await run('CREATE INDEX IF NOT EXISTS idx_user_files_user ON user_files(user_id, folder_id)');
-  await run('CREATE INDEX IF NOT EXISTS idx_logs_user ON logs(user_id)');
-  await run('CREATE INDEX IF NOT EXISTS idx_logs_action ON logs(action)');
-  await run('CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at)');
-  await run('CREATE INDEX IF NOT EXISTS idx_integrations_user ON integrations(user_id)');
-  await run('CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id, integration_id)');
-  await run(`
-    UPDATE api_tokens
-    SET name = name || '-' || id
-    WHERE id NOT IN (
-      SELECT MIN(id)
-      FROM api_tokens
-      GROUP BY integration_id, name
-    )
-  `);
-  await run('CREATE UNIQUE INDEX IF NOT EXISTS idx_api_tokens_integration_name ON api_tokens(integration_id, name)');
-  await run('CREATE INDEX IF NOT EXISTS idx_access_links_token ON access_links(token_hash)');
-  await run('CREATE INDEX IF NOT EXISTS idx_access_links_file ON access_links(user_file_id)');
+        CREATE TABLE IF NOT EXISTS access_links (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          integration_id INTEGER NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+          user_file_id INTEGER NOT NULL REFERENCES user_files(id) ON DELETE CASCADE,
+          token_hash TEXT NOT NULL UNIQUE,
+          disposition TEXT NOT NULL DEFAULT 'inline' CHECK (disposition IN ('inline', 'download')),
+          expires_at TEXT,
+          max_uses INTEGER CHECK (max_uses IS NULL OR max_uses > 0),
+          use_count INTEGER NOT NULL DEFAULT 0 CHECK (use_count >= 0),
+          revoked_at TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+
+      await addMissingFileColumns();
+      await rawExec(`
+        CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256) WHERE sha256 IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_user_folders_list ON user_folders(user_id, parent_id, name);
+        CREATE INDEX IF NOT EXISTS idx_user_files_list ON user_files(user_id, folder_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_user_files_duplicate ON user_files(user_id, folder_id, file_id, name);
+        CREATE INDEX IF NOT EXISTS idx_user_files_file ON user_files(file_id);
+        CREATE INDEX IF NOT EXISTS idx_logs_user ON logs(user_id);
+        CREATE INDEX IF NOT EXISTS idx_logs_action ON logs(action);
+        CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_integrations_user ON integrations(user_id);
+        CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id, integration_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_api_tokens_integration_name ON api_tokens(integration_id, name);
+        CREATE INDEX IF NOT EXISTS idx_access_links_token ON access_links(token_hash);
+        CREATE INDEX IF NOT EXISTS idx_access_links_file ON access_links(user_file_id);
+      `);
+      await createIntegrityTriggers();
+      await rawRun('PRAGMA user_version = 2');
+      await rawRun('COMMIT');
+    } catch (err) {
+      await rawRun('ROLLBACK');
+      throw err;
+    }
+
+    await rawRun('PRAGMA foreign_keys = ON');
+  });
+}
+
+function closeDb() {
+  return enqueue(() => new Promise((resolve, reject) => {
+    db.close((err) => {
+      if (err) return reject(err);
+      return resolve();
+    });
+  }));
 }
 
 module.exports = {
   run,
   get,
   all,
+  transaction,
   initDb,
+  closeDb,
   db,
+  dbPath,
 };
