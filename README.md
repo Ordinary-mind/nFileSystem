@@ -47,7 +47,7 @@ openssl rand -hex 32
 npm start
 ```
 
-服务默认监听 `http://localhost:6001`。开发模式可使用 `npm run dev`。
+服务默认监听 `http://localhost:6001`。开发模式可使用 `npm run dev`，所有配置统一参考 `.env.example`。
 
 ## 环境变量
 
@@ -55,7 +55,7 @@ npm start
 |------|------|--------|
 | `PORT` | 本地 HTTP 端口；Docker 中作为宿主机映射端口 | `6001` |
 | `JWT_SECRET` | JWT 签名密钥，至少 32 字节 | 必填 |
-| `TOKEN_EXPIRES_IN` | Token 有效期 | `.env.example` 为 `30d` |
+| `TOKEN_EXPIRES_IN` | Token 有效期 | `.env.example` 为 `7d` |
 | `ALLOW_REGISTER` | 是否开放注册 | `false` |
 | `TRUST_PROXY` | 可信反向代理层数或 Express 预设值 | `false` |
 | `DATA_DIR` | SQLite 数据目录 | `./data` |
@@ -73,24 +73,30 @@ npm start
 | `AUTH_RATE_LIMIT` | 认证窗口内最大尝试次数 | `10` |
 | `AUTH_RATE_WINDOW_MS` | 认证限流窗口 | `60000` |
 
-`.env` 已被 Git 忽略，不应提交真实密钥。
+`.env` 已被 Git 忽略，不应提交真实密钥。`.env.example` 只用于说明配置，不会被应用自动加载；本地运行和 Docker Compose 都使用项目根目录的 `.env`。
 
 ## Docker 部署
 
-先创建 `.env` 并设置 `JWT_SECRET`，再执行：
+先创建配置，设置 `JWT_SECRET` 并将 `NODE_ENV` 调整为 `production`，再构建并启动：
 
 ```bash
-docker build -t n-file-system:latest .
-docker compose up -d
+cp .env.example .env
+# 编辑 .env，填入随机 JWT_SECRET
+docker compose up -d --build
 ```
 
 查看健康状态：
 
 ```bash
 docker compose ps
+docker compose logs --tail 100 n-file-system
 ```
 
-容器启动时会兼容修正旧持久化卷权限，之后以非 root 用户运行。`data/` 和 `uploads/` 必须同时持久化；只保留其中一个目录不能构成可恢复备份。
+生产镜像需要 `docker-entrypoint.sh`。它在容器启动时兼容修正旧持久化卷权限，然后通过 `su-exec` 降权为 `node` 用户运行服务；Dockerfile 会强制清理 Windows CRLF 并设置可执行权限。`data/` 和 `uploads/` 必须同时持久化，只保留其中一个目录不能构成可恢复备份。
+
+Compose 通过 `env_file` 将 `.env` 直接注入容器；`PORT` 同时用于容器监听端口和宿主机映射端口，无需在 `docker-compose.yml` 中重复维护变量。
+
+如果容器启动后立即退出，优先执行 `docker compose logs --tail 100 n-file-system`。常见原因包括 `.env` 未填写至少 32 字节的 `JWT_SECRET`、旧镜像未使用 `--build` 重建，或宿主机持久化目录不可写。
 
 ## 从旧版本升级
 

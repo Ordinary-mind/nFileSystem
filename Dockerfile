@@ -16,14 +16,15 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # 创建运行时目录
 RUN apk add --no-cache su-exec \
     && mkdir -p data uploads/tmp \
+    && sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
     && chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV NODE_ENV=production
 
-EXPOSE 3000
+EXPOSE 6001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3000/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||6001)+'/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "src/app.js"]

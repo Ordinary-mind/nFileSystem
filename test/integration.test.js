@@ -181,6 +181,22 @@ test('安全响应头和健康检查可用', async () => {
   assert.equal(health.response.headers.get('x-content-type-options'), 'nosniff');
 });
 
+test('移动端模块化前端资源可正常访问', async () => {
+  const index = await api('/');
+  const entry = await api('/app.js');
+  const main = await api('/js/main.js');
+  const styles = await api('/style.css');
+  assert.equal(index.response.status, 200);
+  assert.match(index.data.toString(), /type="module" src="\/app\.js"/);
+  assert.doesNotMatch(index.data.toString(), /id="file-page"/);
+  assert.equal(entry.response.status, 200);
+  assert.match(entry.data.toString(), /js\/main\.js/);
+  assert.equal(main.response.status, 200);
+  assert.match(main.data.toString(), /mountDrive/);
+  assert.equal(styles.response.status, 200);
+  assert.match(styles.data.toString(), /css\/views\.css/);
+});
+
 test('秒传不能通过全局 MD5 取得其他用户文件', async () => {
   aliceToken = await registerAndLogin('alice');
   bobToken = await registerAndLogin('bob');
