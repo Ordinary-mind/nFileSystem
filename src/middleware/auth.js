@@ -33,7 +33,7 @@ function getApiTokenFromRequest(req) {
  * JWT 鉴权中间件
  * Header: Authorization: Bearer <token>
  */
-function authRequired(req, res, next) {
+async function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization || '';
     const [type, token] = authHeader.split(' ');
@@ -43,7 +43,20 @@ function authRequired(req, res, next) {
     }
 
     const payload = verifyToken(token);
-    req.user = payload;
+    if (!Number.isSafeInteger(payload.id) || !Number.isSafeInteger(payload.credentialVersion)) {
+      return res.status(401).json({ message: 'token 无效或已过期' });
+    }
+    const user = await get(
+      `SELECT u.id, u.name, u.credential_version, i.provider_subject AS email
+       FROM users u
+       JOIN user_identities i ON i.user_id = u.id AND i.provider = 'email'
+       WHERE u.id = ?`,
+      [payload.id]
+    );
+    if (!user || user.credential_version !== payload.credentialVersion) {
+      return res.status(401).json({ message: '登录状态已失效，请重新登录' });
+    }
+    req.user = { id: user.id, name: user.name, email: user.email, credentialVersion: user.credential_version };
     return next();
   } catch (err) {
     return res.status(401).json({ message: 'token 无效或已过期' });

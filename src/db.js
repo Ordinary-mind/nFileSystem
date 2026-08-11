@@ -100,6 +100,14 @@ async function addMissingFileColumns() {
   await rawRun('UPDATE files SET storage_key = md5 WHERE storage_key IS NULL OR storage_key = ?', ['']);
 }
 
+async function addMissingUserColumns() {
+  const columns = await rawAll('PRAGMA table_info(users)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('credential_version')) {
+    await rawRun('ALTER TABLE users ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 1');
+  }
+}
+
 async function createIntegrityTriggers() {
   await rawExec(`
     DROP TRIGGER IF EXISTS trg_folder_parent_insert;
@@ -240,7 +248,34 @@ async function initDb() {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL UNIQUE,
           password TEXT NOT NULL,
+          credential_version INTEGER NOT NULL DEFAULT 1,
           created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS user_identities (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          provider TEXT NOT NULL,
+          provider_subject TEXT NOT NULL,
+          verified_at TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(provider, provider_subject),
+          UNIQUE(user_id, provider)
+        );
+
+        CREATE TABLE IF NOT EXISTS verification_challenges (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider TEXT NOT NULL,
+          provider_subject TEXT NOT NULL,
+          purpose TEXT NOT NULL CHECK (purpose IN ('register', 'reset_password')),
+          code_hash TEXT NOT NULL,
+          requester_ip TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'suppressed', 'superseded', 'failed', 'locked', 'consumed')),
+          attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+          expires_at INTEGER NOT NULL,
+          sent_at INTEGER NOT NULL,
+          consumed_at INTEGER,
+          created_at INTEGER NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS files (
@@ -322,6 +357,7 @@ async function initDb() {
       `);
 
       await addMissingFileColumns();
+      await addMissingUserColumns();
       await rawExec(`
         CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256) WHERE sha256 IS NOT NULL;
@@ -337,9 +373,13 @@ async function initDb() {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_api_tokens_integration_name ON api_tokens(integration_id, name);
         CREATE INDEX IF NOT EXISTS idx_access_links_token ON access_links(token_hash);
         CREATE INDEX IF NOT EXISTS idx_access_links_file ON access_links(user_file_id);
+        CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
+        CREATE INDEX IF NOT EXISTS idx_verification_subject ON verification_challenges(provider, provider_subject, purpose, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_verification_ip_created ON verification_challenges(requester_ip, created_at);
+        CREATE INDEX IF NOT EXISTS idx_verification_created ON verification_challenges(created_at);
       `);
       await createIntegrityTriggers();
-      await rawRun('PRAGMA user_version = 2');
+      await rawRun('PRAGMA user_version = 3');
       await rawRun('COMMIT');
     } catch (err) {
       await rawRun('ROLLBACK');

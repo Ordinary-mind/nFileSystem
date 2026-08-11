@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
+const validator = require('validator');
 
 const {
   initDb,
@@ -31,6 +32,13 @@ const {
 } = require('./storage');
 const { hashPassword, comparePassword, signToken } = require('./utils/security');
 const { authRequired, apiTokenRequired, hashApiToken } = require('./middleware/auth');
+const { initializeMailer } = require('./utils/mailer');
+const {
+  VerificationError,
+  requestVerificationCode,
+  consumeVerificationCode,
+  cleanupVerificationChallenges,
+} = require('./utils/email-verification');
 
 const app = express();
 const PORT = parseIntegerEnv('PORT', 3000, 1, 65535);
@@ -93,6 +101,42 @@ function normalizeFileName(value) {
 function getRequestBody(req) {
   if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) return {};
   return req.body;
+}
+
+function normalizeEmail(value) {
+  if (typeof value !== 'string') return null;
+  const email = value.trim().normalize('NFC').toLowerCase();
+  if (!email || email.length > 254 || Buffer.byteLength(email, 'utf8') > 254) return null;
+  if (!validator.isEmail(email, { allow_utf8_local_part: false, require_tld: true })) return null;
+  return email;
+}
+
+function getPassword(value, fieldName = '密码') {
+  if (typeof value !== 'string' || value.length < 8) {
+    throw new HttpError(400, `${fieldName}至少 8 位`);
+  }
+  if (Buffer.byteLength(value, 'utf8') > 72) {
+    throw new HttpError(400, `${fieldName} UTF-8 编码后不能超过 72 字节`);
+  }
+  return value;
+}
+
+function getVerificationCode(value) {
+  if (typeof value !== 'string' || !/^\d{6}$/.test(value)) {
+    throw new HttpError(400, '验证码必须是 6 位数字');
+  }
+  return value;
+}
+
+function maskEmail(email) {
+  const [local, domain] = String(email).split('@');
+  if (!domain) return '***';
+  return `${local.slice(0, 2)}***@${domain}`;
+}
+
+function createLoginResponse(user) {
+  const token = signToken({ id: user.id, credentialVersion: user.credential_version });
+  return { token, user: { id: user.id, email: user.email } };
 }
 
 function parseTrustProxy() {
@@ -747,60 +791,138 @@ app.get('/auth/register-status', (_req, res) => {
   res.json({ allowed: process.env.ALLOW_REGISTER === 'true' });
 });
 
+app.post('/auth/email-codes', authRateLimit, asyncRoute(async (req, res) => {
+  const body = getRequestBody(req);
+  const email = normalizeEmail(body.email);
+  const purpose = body.purpose;
+  if (!email) throw new HttpError(400, '邮箱格式不合法');
+  if (!['register', 'reset_password'].includes(purpose)) throw new HttpError(400, '验证码用途不合法');
+  if (purpose === 'register' && process.env.ALLOW_REGISTER !== 'true') {
+    throw new HttpError(403, '当前不允许注册');
+  }
+  const identity = await get(
+    "SELECT user_id FROM user_identities WHERE provider = 'email' AND provider_subject = ?",
+    [email]
+  );
+  const deliver = purpose === 'register' ? !identity : Boolean(identity);
+  await requestVerificationCode({ email, purpose, ip: getClientIp(req).slice(0, 128), deliver });
+  addLog({
+    userId: identity ? identity.user_id : null,
+    action: 'verification_code_requested',
+    targetType: 'user',
+    targetId: identity ? identity.user_id : null,
+    detail: JSON.stringify({ email: maskEmail(email), purpose }),
+  }, req);
+  res.status(202).json({ message: '如果该操作可用，验证码将发送到邮箱' });
+}));
+
 app.post('/auth/register', authRateLimit, asyncRoute(async (req, res) => {
   if (process.env.ALLOW_REGISTER !== 'true') throw new HttpError(403, '当前不允许注册');
   const body = getRequestBody(req);
-  const name = typeof body.name === 'string' ? body.name.normalize('NFC') : '';
-  const password = body.password;
-  if (!name || name !== name.trim() || name.length < 2 || name.length > 32) {
-    throw new HttpError(400, '用户名长度需为 2-32 位且首尾不能有空格');
-  }
-  if (typeof password !== 'string' || password.length < 8) {
-    throw new HttpError(400, '密码至少 8 位');
-  }
-  if (Buffer.byteLength(password, 'utf8') > 72) {
-    throw new HttpError(400, '密码 UTF-8 编码后不能超过 72 字节');
-  }
-
+  const email = normalizeEmail(body.email);
+  if (!email) throw new HttpError(400, '邮箱格式不合法');
+  const password = getPassword(body.password);
+  const code = getVerificationCode(body.code);
   const hashed = await hashPassword(password);
-  let result;
-  try {
-    result = await run('INSERT INTO users(name, password) VALUES (?, ?)', [name, hashed]);
-  } catch (err) {
-    if (err.code === 'SQLITE_CONSTRAINT') {
-      addLog({ userId: null, action: 'register_failed', detail: JSON.stringify({ name, reason: '用户名已存在' }) }, req);
-      throw new HttpError(409, '用户名已存在');
-    }
-    throw err;
-  }
-  addLog({ userId: result.lastID, action: 'register', targetType: 'user', targetId: result.lastID }, req);
-  res.json({ message: '注册成功' });
+  const userId = await consumeVerificationCode({ email, purpose: 'register', code }, async (tx) => {
+    const existing = await tx.get(
+      "SELECT user_id FROM user_identities WHERE provider = 'email' AND provider_subject = ?",
+      [email]
+    );
+    if (existing) throw new HttpError(409, '该邮箱已注册');
+    const result = await tx.run(
+      'INSERT INTO users(name, password, credential_version) VALUES (?, ?, 1)',
+      [email, hashed]
+    );
+    await tx.run(
+      "INSERT INTO user_identities(user_id, provider, provider_subject, verified_at) VALUES (?, 'email', ?, datetime('now'))",
+      [result.lastID, email]
+    );
+    return result.lastID;
+  });
+  addLog({ userId, action: 'register', targetType: 'user', targetId: userId }, req);
+  res.status(201).json({ message: '注册成功，请登录' });
 }));
 
 app.post('/auth/login', authRateLimit, asyncRoute(async (req, res) => {
   const body = getRequestBody(req);
-  const name = typeof body.name === 'string' ? body.name : '';
+  const email = normalizeEmail(body.email);
   const password = typeof body.password === 'string' ? body.password : '';
-  if (!name || !password || name.length > 128 || password.length > 4096) {
-    throw new HttpError(400, 'name 和 password 格式不合法');
+  if (!email || !password || password.length > 4096) {
+    throw new HttpError(400, 'email 和 password 格式不合法');
   }
 
-  const user = await get('SELECT id, name, password FROM users WHERE name = ?', [name]);
+  const user = await get(
+    `SELECT u.id, u.name, u.password, u.credential_version, i.provider_subject AS email
+     FROM user_identities i JOIN users u ON u.id = i.user_id
+     WHERE i.provider = 'email' AND i.provider_subject = ?`,
+    [email]
+  );
   if (!user || !(await comparePassword(password, user.password))) {
     addLog({
       userId: user ? user.id : null,
       action: 'login_failed',
       targetType: user ? 'user' : null,
       targetId: user ? user.id : null,
-      detail: JSON.stringify({ name }),
+      detail: JSON.stringify({ email: maskEmail(email || '') }),
     }, req);
-    throw new HttpError(401, '用户名或密码错误');
+    throw new HttpError(401, '邮箱或密码错误');
   }
 
   authAttempts.delete(getClientIp(req));
-  const token = signToken({ id: user.id, name: user.name });
+  const login = createLoginResponse(user);
   addLog({ userId: user.id, action: 'login', targetType: 'user', targetId: user.id }, req);
-  res.json({ message: '登录成功', token, user: { id: user.id, name: user.name } });
+  res.json({ message: '登录成功', ...login });
+}));
+
+app.post('/auth/password/reset', authRateLimit, asyncRoute(async (req, res) => {
+  const body = getRequestBody(req);
+  const email = normalizeEmail(body.email);
+  if (!email) throw new HttpError(400, '邮箱格式不合法');
+  const code = getVerificationCode(body.code);
+  const newPassword = getPassword(body.newPassword, '新密码');
+  const hashed = await hashPassword(newPassword);
+  const userId = await consumeVerificationCode({ email, purpose: 'reset_password', code }, async (tx) => {
+    const user = await tx.get(
+      `SELECT u.id, u.password FROM user_identities i JOIN users u ON u.id = i.user_id
+       WHERE i.provider = 'email' AND i.provider_subject = ?`,
+      [email]
+    );
+    if (!user) throw new HttpError(400, '验证码无效或已过期');
+    if (await comparePassword(newPassword, user.password)) throw new HttpError(400, '新密码不能与原密码相同');
+    await tx.run('UPDATE users SET password = ?, credential_version = credential_version + 1 WHERE id = ?', [hashed, user.id]);
+    return user.id;
+  });
+  addLog({ userId, action: 'password_reset', targetType: 'user', targetId: userId }, req);
+  res.json({ message: '密码已重置，请重新登录' });
+}));
+
+app.post('/auth/password/change', authRequired, asyncRoute(async (req, res) => {
+  const body = getRequestBody(req);
+  const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : '';
+  const newPassword = getPassword(body.newPassword, '新密码');
+  if (!currentPassword || currentPassword.length > 4096) throw new HttpError(400, '当前密码格式不合法');
+  const user = await get('SELECT id, password, credential_version FROM users WHERE id = ?', [req.user.id]);
+  if (!user || !(await comparePassword(currentPassword, user.password))) {
+    throw new HttpError(400, '当前密码错误');
+  }
+  if (currentPassword === newPassword) throw new HttpError(400, '新密码不能与原密码相同');
+  const hashed = await hashPassword(newPassword);
+  const changed = await run(
+    `UPDATE users SET password = ?, credential_version = credential_version + 1
+     WHERE id = ? AND password = ? AND credential_version = ?`,
+    [hashed, user.id, user.password, user.credential_version]
+  );
+  if (!changed.changes) throw new HttpError(409, '账号状态已变化，请重新登录后再试');
+  const updated = await get(
+    `SELECT u.id, u.credential_version, i.provider_subject AS email
+     FROM users u JOIN user_identities i ON i.user_id = u.id AND i.provider = 'email'
+     WHERE u.id = ?`,
+    [user.id]
+  );
+  const login = createLoginResponse(updated);
+  addLog({ userId: user.id, action: 'password_change', targetType: 'user', targetId: user.id }, req);
+  res.json({ message: '密码修改成功', ...login });
 }));
 
 
@@ -1390,7 +1512,8 @@ app.get('/files/:md5/download', authRequired, asyncRoute(async (req, res, next) 
 
 app.use((err, _req, res, next) => {
   if (res.headersSent) return next(err);
-  if (err instanceof HttpError) {
+  if (err instanceof HttpError || err instanceof VerificationError) {
+    if (err.retryAfter) res.set('Retry-After', String(err.retryAfter));
     res.status(err.status).json({ message: err.message, code: err.code });
     return;
   }
@@ -1411,8 +1534,10 @@ app.use((err, _req, res, next) => {
 });
 
 async function bootstrap(port = PORT) {
+  await initializeMailer();
   await ensureStorageDirs();
   await initDb();
+  await cleanupVerificationChallenges();
   const staleCount = await cleanupStaleTempFiles(STALE_TEMP_MAX_AGE_MS);
   const orphanCount = await garbageCollectUnreferencedFiles();
   if (staleCount || orphanCount) {
@@ -1422,6 +1547,8 @@ async function bootstrap(port = PORT) {
   maintenanceTimer = setInterval(() => {
     cleanupStaleTempFiles(STALE_TEMP_MAX_AGE_MS)
       .catch((err) => console.error('定期清理临时文件失败:', err.message));
+    cleanupVerificationChallenges()
+      .catch((err) => console.error('定期清理验证码失败:', err.message));
   }, 6 * 60 * 60 * 1000);
   maintenanceTimer.unref();
 

@@ -17,6 +17,7 @@ const legacyMd5 = crypto.createHash('md5').update(legacyContent).digest('hex');
 process.env.DATA_DIR = dataDir;
 process.env.UPLOAD_DIR = uploadDir;
 process.env.JWT_SECRET = 'test-only-secret-that-is-longer-than-32-bytes';
+process.env.AUTH_CODE_SECRET = 'test-only-code-secret-that-is-longer-than-32-bytes';
 process.env.TOKEN_EXPIRES_IN = '10m';
 process.env.ALLOW_REGISTER = 'true';
 process.env.USER_QUOTA_BYTES = String(1024 * 1024 * 1024);
@@ -27,6 +28,7 @@ process.env.NODE_ENV = 'test';
 let appModule;
 let dbModule;
 let storageModule;
+let mailerModule;
 let baseUrl;
 let legacyToken;
 let aliceToken;
@@ -119,10 +121,21 @@ async function api(urlPath, options = {}) {
   return { response, data };
 }
 
-async function registerAndLogin(name, password = 'password-123') {
-  const registration = await api('/auth/register', { method: 'POST', body: { name, password } });
-  assert.equal(registration.response.status, 200);
-  const login = await api('/auth/login', { method: 'POST', body: { name, password } });
+async function requestCode(email, purpose) {
+  mailerModule.clearTestOutbox();
+  const requested = await api('/auth/email-codes', { method: 'POST', body: { email, purpose } });
+  assert.equal(requested.response.status, 202);
+  const outbox = mailerModule.getTestOutbox();
+  assert.equal(outbox.length, 1);
+  return outbox[0].code;
+}
+
+async function registerAndLogin(label, password = 'password-123') {
+  const email = `${label}@example.com`;
+  const code = await requestCode(email, 'register');
+  const registration = await api('/auth/register', { method: 'POST', body: { email, password, code } });
+  assert.equal(registration.response.status, 201);
+  const login = await api('/auth/login', { method: 'POST', body: { email, password } });
   assert.equal(login.response.status, 200);
   return login.data.token;
 }
@@ -149,6 +162,7 @@ before(async () => {
   appModule = require('../src/app');
   dbModule = require('../src/db');
   storageModule = require('../src/storage');
+  mailerModule = require('../src/utils/mailer');
   const server = await appModule.bootstrap(0);
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
@@ -160,12 +174,18 @@ after(async () => {
 
 test('旧数据库与 MD5 存储路径可自动升级并继续下载', async () => {
   const version = await dbModule.get('PRAGMA user_version');
-  assert.equal(version.user_version, 2);
+  assert.equal(version.user_version, 3);
   const record = await dbModule.get('SELECT storage_key, sha256 FROM files WHERE md5 = ?', [legacyMd5]);
   assert.equal(record.storage_key, legacyMd5);
   assert.equal(record.sha256, null);
 
-  const login = await api('/auth/login', { method: 'POST', body: { name: 'legacy', password: 'legacy-pass' } });
+  const legacyUser = await dbModule.get("SELECT id, credential_version FROM users WHERE name = 'legacy'");
+  assert.equal(legacyUser.credential_version, 1);
+  await dbModule.run(
+    "INSERT INTO user_identities(user_id, provider, provider_subject, verified_at) VALUES (?, 'email', 'legacy@example.com', datetime('now'))",
+    [legacyUser.id]
+  );
+  const login = await api('/auth/login', { method: 'POST', body: { email: 'legacy@example.com', password: 'legacy-pass' } });
   assert.equal(login.response.status, 200);
   legacyToken = login.data.token;
   const download = await api(`/files/${legacyMd5}/download`, { token: legacyToken });
@@ -197,6 +217,101 @@ test('移动端模块化前端资源可正常访问', async () => {
   assert.match(styles.data.toString(), /css\/views\.css/);
 });
 
+test('邮箱注册、重置密码和修改密码形成完整安全闭环', async () => {
+  const email = 'account@example.com';
+  const registerCode = await requestCode(email, 'register');
+  const wrongCode = await api('/auth/register', {
+    method: 'POST', body: { email, password: 'first-password', code: '000000' === registerCode ? '000001' : '000000' },
+  });
+  assert.equal(wrongCode.response.status, 400);
+  const attempted = await dbModule.get(
+    "SELECT attempts FROM verification_challenges WHERE provider_subject = ? AND purpose = 'register' AND status = 'active'",
+    [email]
+  );
+  assert.equal(attempted.attempts, 1);
+
+  const registered = await api('/auth/register', {
+    method: 'POST', body: { email: 'Account@Example.com', password: 'first-password', code: registerCode },
+  });
+  assert.equal(registered.response.status, 201);
+  const login = await api('/auth/login', {
+    method: 'POST', body: { email: 'ACCOUNT@EXAMPLE.COM', password: 'first-password' },
+  });
+  assert.equal(login.response.status, 200);
+  assert.equal(login.data.user.email, email);
+  const firstToken = login.data.token;
+
+  mailerModule.clearTestOutbox();
+  const duplicateCode = await api('/auth/email-codes', {
+    method: 'POST', body: { email: 'legacy@example.com', purpose: 'register' },
+  });
+  assert.equal(duplicateCode.response.status, 202);
+  assert.equal(mailerModule.getTestOutbox().length, 0);
+
+  mailerModule.clearTestOutbox();
+  const unknownReset = await api('/auth/email-codes', {
+    method: 'POST', body: { email: 'unknown@example.com', purpose: 'reset_password' },
+  });
+  assert.equal(unknownReset.response.status, 202);
+  assert.equal(mailerModule.getTestOutbox().length, 0);
+
+  const resetCode = await requestCode(email, 'reset_password');
+  const reset = await api('/auth/password/reset', {
+    method: 'POST', body: { email, code: resetCode, newPassword: 'second-password' },
+  });
+  assert.equal(reset.response.status, 200);
+  const invalidatedByReset = await api('/drive', { token: firstToken });
+  assert.equal(invalidatedByReset.response.status, 401);
+  const oldPassword = await api('/auth/login', {
+    method: 'POST', body: { email, password: 'first-password' },
+  });
+  assert.equal(oldPassword.response.status, 401);
+  const secondLogin = await api('/auth/login', {
+    method: 'POST', body: { email, password: 'second-password' },
+  });
+  assert.equal(secondLogin.response.status, 200);
+
+  const wrongCurrent = await api('/auth/password/change', {
+    method: 'POST', token: secondLogin.data.token,
+    body: { currentPassword: 'wrong-password', newPassword: 'third-password' },
+  });
+  assert.equal(wrongCurrent.response.status, 400);
+  const changed = await api('/auth/password/change', {
+    method: 'POST', token: secondLogin.data.token,
+    body: { currentPassword: 'second-password', newPassword: 'third-password' },
+  });
+  assert.equal(changed.response.status, 200);
+  const invalidatedByChange = await api('/drive', { token: secondLogin.data.token });
+  assert.equal(invalidatedByChange.response.status, 401);
+  const replacementToken = await api('/drive', { token: changed.data.token });
+  assert.equal(replacementToken.response.status, 200);
+
+  const storedCode = await dbModule.get('SELECT code_hash FROM verification_challenges WHERE purpose = ? LIMIT 1', ['register']);
+  assert.match(storedCode.code_hash, /^[a-f0-9]{64}$/);
+  assert.notEqual(storedCode.code_hash, registerCode);
+});
+
+test('邮箱验证码连续错误五次后锁定', async () => {
+  const email = 'locked@example.com';
+  const code = await requestCode(email, 'register');
+  const wrongCode = code === '999999' ? '999998' : '999999';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const rejected = await api('/auth/register', {
+      method: 'POST', body: { email, password: 'password-123', code: wrongCode },
+    });
+    assert.equal(rejected.response.status, 400);
+  }
+  const locked = await dbModule.get(
+    "SELECT attempts, status FROM verification_challenges WHERE provider_subject = ? AND purpose = 'register'",
+    [email]
+  );
+  assert.deepEqual(locked, { attempts: 5, status: 'locked' });
+  const correctAfterLock = await api('/auth/register', {
+    method: 'POST', body: { email, password: 'password-123', code },
+  });
+  assert.equal(correctAfterLock.response.status, 400);
+});
+
 test('秒传不能通过全局 MD5 取得其他用户文件', async () => {
   aliceToken = await registerAndLogin('alice');
   bobToken = await registerAndLogin('bob');
@@ -222,7 +337,7 @@ test('正常上传取得的共享内容不会被其他用户删除操作误回�
   const bobUpload = await upload(bobToken, 'owned-copy.txt', content);
   assert.equal(bobUpload.response.status, 200);
 
-  const alice = await dbModule.get('SELECT id FROM users WHERE name = ?', ['alice']);
+  const alice = await dbModule.get('SELECT id FROM users WHERE name = ?', ['alice@example.com']);
   const aliceReference = await dbModule.get(`
     SELECT uf.id FROM user_files uf JOIN files f ON f.id = uf.file_id
     WHERE uf.user_id = ? AND f.md5 = ? LIMIT 1
@@ -367,7 +482,7 @@ test('删除最后一个引用会回收数据库记录和物理文件', async ()
 
 test('目录列表支持稳定分页', async () => {
   const parentId = await createFolder(aliceToken, 'paged');
-  const user = await dbModule.get('SELECT id FROM users WHERE name = ?', ['alice']);
+  const user = await dbModule.get('SELECT id FROM users WHERE name = ?', ['alice@example.com']);
   await dbModule.transaction(async (tx) => {
     for (let index = 0; index < 205; index++) {
       await tx.run(
@@ -383,4 +498,22 @@ test('目录列表支持稳定分页', async () => {
   assert.equal(first.data.page.hasMore, true);
   assert.equal(second.data.folders.length, 5);
   assert.equal(second.data.page.hasMore, false);
+});
+
+test('关闭注册时禁止注册验证码但保留密码找回入口', async () => {
+  process.env.ALLOW_REGISTER = 'false';
+  try {
+    const registerCode = await api('/auth/email-codes', {
+      method: 'POST', body: { email: 'closed@example.com', purpose: 'register' },
+    });
+    assert.equal(registerCode.response.status, 403);
+    mailerModule.clearTestOutbox();
+    const resetCode = await api('/auth/email-codes', {
+      method: 'POST', body: { email: 'nobody@example.com', purpose: 'reset_password' },
+    });
+    assert.equal(resetCode.response.status, 202);
+    assert.equal(mailerModule.getTestOutbox().length, 0);
+  } finally {
+    process.env.ALLOW_REGISTER = 'true';
+  }
 });

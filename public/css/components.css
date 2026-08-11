@@ -16,6 +16,9 @@
 .top-bar.no-back { grid-template-columns: minmax(0, 1fr) 44px; }
 .top-bar h1 { margin: 0; font-size: 19px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .top-bar-subtitle { color: var(--muted); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.selection-bar { grid-template-columns: 44px minmax(0, 1fr) 44px; }
+.selection-bar h1 { text-align: center; }
+.danger-icon { color: var(--danger); }
 
 .icon-button {
   width: 44px;

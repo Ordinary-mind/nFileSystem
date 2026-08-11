@@ -1,6 +1,6 @@
 import { request, requestBlob } from '../core/api.js';
 import { fileIconName, icon } from '../core/icons.js';
-import { escapeHtml, formatDate, formatSize, getExtension } from '../core/utils.js';
+import { escapeHtml, formatDate, formatSize, getExtension, hasPressMoved, selectionKey } from '../core/utils.js';
 import { confirmDialog, errorView, loadingView, openActionSheet, openOverlay, promptText, showToast } from '../core/ui.js';
 import { uploadFiles } from '../features/upload.js';
 
@@ -15,12 +15,22 @@ export function mountDrive(root, folderId, navigate) {
   let hasMore = false;
   let requestId = 0;
   const currentFolderId = folderId || null;
+  const selected = new Map();
+  let longPressTimer = null;
+  let longPressRow = null;
+  let longPressStart = null;
+  let suppressClickUntil = 0;
 
   root.innerHTML = `
-    <div class="top-bar ${currentFolderId ? '' : 'no-back'}">
+    <div class="top-bar ${currentFolderId ? '' : 'no-back'}" data-normal-bar>
       ${currentFolderId ? `<button type="button" class="icon-button" data-back aria-label="返回上级">${icon('back')}</button>` : ''}
       <div><h1 data-title>${currentFolderId ? '文件夹' : '我的文件'}</h1><div class="top-bar-subtitle" data-summary>正在加载</div></div>
       <button type="button" class="icon-button" data-search-toggle aria-label="搜索">${icon('search')}</button>
+    </div>
+    <div class="top-bar selection-bar hidden" data-selection-bar>
+      <button type="button" class="icon-button" data-selection-cancel aria-label="取消选择">${icon('close')}</button>
+      <div><h1 data-selection-summary>已选择 0 项</h1><div class="top-bar-subtitle">长按或点按选择项目</div></div>
+      <button type="button" class="icon-button danger-icon" data-selection-delete aria-label="删除选中项">${icon('trash')}</button>
     </div>
     <div class="search-panel hidden" data-search-panel>
       ${icon('search')}<input type="search" placeholder="搜索当前目录" aria-label="搜索当前目录"><button type="button" data-clear>清除</button>
@@ -37,6 +47,12 @@ export function mountDrive(root, folderId, navigate) {
   const searchPanel = root.querySelector('[data-search-panel]');
   const searchInput = searchPanel.querySelector('input');
   const fileInput = root.querySelector('[data-file-input]');
+  const normalBar = root.querySelector('[data-normal-bar]');
+  const selectionBar = root.querySelector('[data-selection-bar]');
+  const selectionSummary = root.querySelector('[data-selection-summary]');
+  const selectionDelete = root.querySelector('[data-selection-delete]');
+  const selectionCancel = root.querySelector('[data-selection-cancel]');
+  const createButton = root.querySelector('[data-create]');
 
   function goFolder(id) {
     navigate(id ? `files/${id}` : 'files');
@@ -75,13 +91,43 @@ export function mountDrive(root, folderId, navigate) {
     const isFolder = item.type === 'folder';
     const meta = isFolder ? `文件夹 · ${formatDate(item.created_at)}` : `${formatSize(item.size)} · ${escapeHtml(getExtension(item.name).toUpperCase() || '文件')} · ${formatDate(item.created_at)}`;
     return `
-      <article class="drive-row" data-type="${item.type}" data-id="${item.id}" data-name="${escapeHtml(item.name)}" data-md5="${escapeHtml(item.md5 || '')}">
+      <article class="drive-row ${selected.has(selectionKey(item)) ? 'selected' : ''}" data-type="${item.type}" data-id="${item.id}" data-name="${escapeHtml(item.name)}" data-md5="${escapeHtml(item.md5 || '')}">
         <button type="button" class="drive-main" data-open>
           <span class="file-symbol ${isFolder ? 'folder-symbol' : ''}">${icon(isFolder ? 'folder' : fileIconName(item.name))}</span>
           <span class="drive-text"><strong>${escapeHtml(item.name)}</strong><small>${meta}</small></span>
         </button>
+        <span class="selection-indicator" aria-hidden="true">${icon('check')}</span>
         <button type="button" class="icon-button more-button" data-more aria-label="更多操作">${icon('more')}</button>
       </article>`;
+  }
+
+  function updateSelectionView() {
+    const active = selected.size > 0;
+    normalBar.classList.toggle('hidden', active);
+    selectionBar.classList.toggle('hidden', !active);
+    createButton.classList.toggle('hidden', active);
+    if (active) searchPanel.classList.add('hidden');
+    list.classList.toggle('selection-active', active);
+    selectionSummary.textContent = `已选择 ${selected.size} 项`;
+    list.querySelectorAll('.drive-row').forEach((row) => {
+      const isSelected = selected.has(selectionKey(row.dataset));
+      row.classList.toggle('selected', isSelected);
+      const openButton = row.querySelector('[data-open]');
+      if (active) openButton.setAttribute('aria-pressed', String(isSelected));
+      else openButton.removeAttribute('aria-pressed');
+    });
+  }
+
+  function toggleSelection(item) {
+    const key = selectionKey(item);
+    if (selected.has(key)) selected.delete(key);
+    else selected.set(key, item);
+    updateSelectionView();
+  }
+
+  function clearSelection() {
+    selected.clear();
+    updateSelectionView();
   }
 
   async function load(append = false) {
@@ -143,6 +189,38 @@ export function mountDrive(root, folderId, navigate) {
     } catch (error) { showToast(error.message, 'error'); }
   }
 
+  async function deleteSelected() {
+    const items = Array.from(selected.values());
+    if (!items.length) return;
+    const folderCount = items.filter((item) => item.type === 'folder').length;
+    const accepted = await confirmDialog({
+      title: `删除 ${items.length} 项`,
+      message: folderCount ? `包含 ${folderCount} 个文件夹，文件夹内的所有内容也会被删除，此操作无法撤销。` : '选中的文件将从当前账户中删除，此操作无法撤销。',
+      confirmLabel: '全部删除', danger: true,
+    });
+    if (!accepted) return;
+    selectionDelete.disabled = true;
+    let deleted = 0;
+    let failed = 0;
+    try {
+      for (const item of items) {
+        selectionSummary.textContent = `正在删除 ${deleted + failed + 1}/${items.length}`;
+        try {
+          await request(`/drive/${item.type}/${item.id}`, { method: 'DELETE' });
+          deleted++;
+        } catch {
+          failed++;
+        }
+      }
+      clearSelection();
+      await load();
+      if (failed) showToast(`已删除 ${deleted} 项，${failed} 项删除失败`, 'error');
+      else showToast(`已删除 ${deleted} 项`);
+    } finally {
+      selectionDelete.disabled = false;
+    }
+  }
+
   async function downloadFile(item) {
     try {
       const blob = await requestBlob(`/files/${item.md5}/download?name=${encodeURIComponent(item.name)}`);
@@ -180,6 +258,7 @@ export function mountDrive(root, folderId, navigate) {
           { label: '打开', icon: 'folder', run: () => goFolder(item.id) },
           { label: '重命名', icon: 'edit', run: () => renameItem(item) },
           { label: '移动到', icon: 'move', run: () => openMove(item) },
+          { label: '多选', icon: 'check', run: () => toggleSelection(item) },
           { label: '删除', icon: 'trash', danger: true, run: () => deleteItem(item) },
         ]
       : [
@@ -187,6 +266,7 @@ export function mountDrive(root, folderId, navigate) {
           { label: '下载', icon: 'download', run: () => downloadFile(item) },
           { label: '重命名', icon: 'edit', run: () => renameItem(item) },
           { label: '移动到', icon: 'move', run: () => openMove(item) },
+          { label: '多选', icon: 'check', run: () => toggleSelection(item) },
           { label: '删除', icon: 'trash', danger: true, run: () => deleteItem(item) },
         ];
     openActionSheet(item.name, actions);
@@ -254,13 +334,46 @@ export function mountDrive(root, folderId, navigate) {
   }
 
   list.addEventListener('click', (event) => {
+    if (Date.now() < suppressClickUntil) {
+      event.preventDefault();
+      return;
+    }
     const row = event.target.closest('.drive-row');
     if (!row) return;
     const item = { type: row.dataset.type, id: row.dataset.id, name: row.dataset.name, md5: row.dataset.md5 };
-    if (event.target.closest('[data-more]')) openItemActions(item);
+    if (selected.size) toggleSelection(item);
+    else if (event.target.closest('[data-more]')) openItemActions(item);
     else if (event.target.closest('[data-open]')) item.type === 'folder' ? goFolder(item.id) : previewFile(item);
   });
-  root.querySelector('[data-create]').addEventListener('click', () => openActionSheet('添加内容', [
+  list.addEventListener('pointerdown', (event) => {
+    const row = event.target.closest('.drive-row');
+    if (!row || !event.target.closest('[data-open]') || selected.size) return;
+    longPressRow = row;
+    longPressStart = { x: event.clientX, y: event.clientY };
+    window.clearTimeout(longPressTimer);
+    longPressTimer = window.setTimeout(() => {
+      if (!longPressRow?.isConnected) return;
+      const item = { type: row.dataset.type, id: row.dataset.id, name: row.dataset.name, md5: row.dataset.md5 };
+      toggleSelection(item);
+      suppressClickUntil = Date.now() + 700;
+      navigator.vibrate?.(25);
+    }, 500);
+  });
+  list.addEventListener('pointermove', (event) => {
+    if (longPressStart && hasPressMoved(longPressStart.x, longPressStart.y, event.clientX, event.clientY)) {
+      window.clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach((eventName) => list.addEventListener(eventName, () => {
+    window.clearTimeout(longPressTimer);
+    longPressTimer = null;
+    longPressRow = null;
+    longPressStart = null;
+  }));
+  selectionCancel.addEventListener('click', clearSelection);
+  selectionDelete.addEventListener('click', deleteSelected);
+  createButton.addEventListener('click', () => openActionSheet('添加内容', [
     { label: '上传文件', icon: 'upload', run: () => fileInput.click() },
     { label: '新建文件夹', icon: 'folder', run: createFolder },
   ]));

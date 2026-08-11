@@ -48,15 +48,19 @@ export function startApp() {
     const root = app.querySelector('#view-root');
     if (route.section === 'files') mountDrive(root, route.id, navigate);
     else if (route.section === 'apps') mountIntegrations(root, route.id, navigate);
-    else mountProfile(root, getSession().userName, () => logout(true));
+    else mountProfile(root, getSession().userEmail, () => logout(true), (token, email) => {
+      saveSession(token, email);
+      showToast('密码修改成功');
+      render();
+    });
   }
 
   function render() {
     const session = getSession();
     if (!session.token) {
-      mountAuth(app, (token, userName) => {
-        saveSession(token, userName);
-        showToast(`欢迎回来，${userName}`);
+      mountAuth(app, (token, email) => {
+        saveSession(token, email);
+        showToast(`欢迎回来，${email}`);
         navigate('files', true);
         render();
       });

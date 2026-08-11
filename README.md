@@ -55,8 +55,14 @@ npm start
 |------|------|--------|
 | `PORT` | 本地 HTTP 端口；Docker 中作为宿主机映射端口 | `6001` |
 | `JWT_SECRET` | JWT 签名密钥，至少 32 字节 | 必填 |
+| `AUTH_CODE_SECRET` | 邮箱验证码 HMAC 密钥，至少 32 字节 | 必填 |
 | `TOKEN_EXPIRES_IN` | Token 有效期 | `.env.example` 为 `7d` |
 | `ALLOW_REGISTER` | 是否开放注册 | `false` |
+| `SMTP_HOST` | SMTP 服务器地址 | 生产环境必填 |
+| `SMTP_PORT` | SMTP 服务器端口 | `587` |
+| `SMTP_SECURE` | 是否直接使用 TLS，端口 465 通常设为 `true` | `false` |
+| `SMTP_USER` / `SMTP_PASS` | SMTP 认证信息，必须同时配置 | 空 |
+| `MAIL_FROM` | 验证码邮件发件人 | 生产环境必填 |
 | `TRUST_PROXY` | 可信反向代理层数或 Express 预设值 | `false` |
 | `DATA_DIR` | SQLite 数据目录 | `./data` |
 | `UPLOAD_DIR` | 物理文件目录 | `./uploads` |
@@ -77,11 +83,11 @@ npm start
 
 ## Docker 部署
 
-先创建配置，设置 `JWT_SECRET` 并将 `NODE_ENV` 调整为 `production`，再构建并启动：
+先创建配置，设置两个随机密钥、SMTP 发件信息并将 `NODE_ENV` 调整为 `production`，再构建并启动：
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入随机 JWT_SECRET
+# 编辑 .env，填入 JWT_SECRET、AUTH_CODE_SECRET 和 SMTP 配置
 docker compose up -d --build
 ```
 
@@ -96,18 +102,18 @@ docker compose logs --tail 100 n-file-system
 
 Compose 通过 `env_file` 将 `.env` 直接注入容器；`PORT` 同时用于容器监听端口和宿主机映射端口，无需在 `docker-compose.yml` 中重复维护变量。
 
-如果容器启动后立即退出，优先执行 `docker compose logs --tail 100 n-file-system`。常见原因包括 `.env` 未填写至少 32 字节的 `JWT_SECRET`、旧镜像未使用 `--build` 重建，或宿主机持久化目录不可写。
+如果容器启动后立即退出，优先执行 `docker compose logs --tail 100 n-file-system`。常见原因包括密钥长度不足、SMTP 连接或认证失败、旧镜像未使用 `--build` 重建，或宿主机持久化目录不可写。
 
 ## 从旧版本升级
 
-升级会自动把旧数据库迁移到 schema v2。已有用户、目录、文件引用和下载 URL 保持不变；旧物理文件仍从 `uploads/<md5前2位>/<md5第3-4位>/<md5+扩展名>` 读取，不会在启动时批量搬迁。只有新上传内容使用 SHA-256 路径。
+升级会自动把旧数据库迁移到 schema v3，并保留原有文件记录。由于登录标识改为已验证邮箱，没有邮箱身份的旧账号不能继续登录。本版本按全新邮箱账号体系部署，升级前请完整备份后人工清空 `data/` 和 `uploads/`；应用不会自动删除旧数据。
 
 建议按以下顺序升级：
 
 1. 停止旧服务，完整备份 `data/` 和 `uploads/`。
 2. 升级到 Node.js 22+，执行 `npm ci`，或重新构建 Docker 镜像。
-3. 检查 `.env`，保留自定义强密钥可避免现有登录失效。
-4. 启动一次服务，让数据库迁移在事务中完成。
+3. 核对准备清空的目录确实是 Compose 绑定的项目 `data/` 和 `uploads/`，再人工清空旧数据。
+4. 配置新的强密钥和 SMTP，启动服务并使用邮箱验证码注册。
 5. 停止服务并运行一次 `npm run storage:check`，确认数据和物理文件一致。
 
 仓库旧版本曾提交过 `my-dev-secret-change-in-production`。该值已经泄露并被当前版本拒绝；如果部署仍在使用它，必须换成新的随机密钥，现有登录会失效一次。代码和数据库无法替你安全地轮换外部部署密钥。
@@ -156,8 +162,11 @@ npm run storage:check -- --clean-orphans
 |------|------|------|
 | GET | `/healthz` | 数据库和存储目录健康检查 |
 | GET | `/auth/register-status` | 查询是否开放注册 |
-| POST | `/auth/register` | 注册 |
-| POST | `/auth/login` | 登录并返回 JWT |
+| POST | `/auth/email-codes` | 发送注册或重置密码邮箱验证码 |
+| POST | `/auth/register` | 使用邮箱、密码和验证码注册 |
+| POST | `/auth/login` | 使用邮箱和密码登录并返回 JWT |
+| POST | `/auth/password/reset` | 使用邮箱验证码重置密码 |
+| POST | `/auth/password/change` | 登录后校验当前密码并修改密码 |
 | GET | `/drive` | 获取目录项，支持 `folderId`、`name`、`limit`、`offset` |
 | POST | `/drive/folder` | 创建文件夹 |
 | PUT | `/drive/folder/:id` | 重命名文件夹 |

@@ -52,3 +52,11 @@ export function parseScopes(scopes) {
   if (Array.isArray(scopes)) return scopes;
   return String(scopes || '').split(',').map((scope) => scope.trim()).filter(Boolean);
 }
+
+export function selectionKey(item) {
+  return `${String(item.type || '')}:${String(item.id || '')}`;
+}
+
+export function hasPressMoved(startX, startY, currentX, currentY, threshold = 10) {
+  return Math.hypot(Number(currentX) - Number(startX), Number(currentY) - Number(startY)) > threshold;
+}

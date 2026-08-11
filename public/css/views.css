@@ -16,6 +16,10 @@
 .segment.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 4px rgba(16, 24, 40, 0.1); }
 .auth-form { display: grid; }
 .auth-submit { width: 100%; margin-top: 22px; }
+.auth-link { width: max-content; margin: 12px 0 -8px auto; padding: 4px 0; border: 0; background: transparent; color: var(--primary); font-size: 13px; }
+.auth-back { margin: -8px 0 14px; }
+.code-field { display: grid; grid-template-columns: minmax(0, 1fr) 116px; gap: 8px; }
+.code-field .secondary-button { min-width: 0; padding: 0 10px; font-size: 13px; }
 .password-field { position: relative; }
 .password-field .text-field { padding-right: 52px; }
 .password-toggle { position: absolute; right: 3px; top: 2px; width: 44px; height: 44px; border: 0; background: transparent; color: var(--muted); display: flex; align-items: center; justify-content: center; }
@@ -36,6 +40,13 @@
 
 .drive-list { margin-top: 8px; background: var(--surface); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .drive-row { min-height: 72px; display: grid; grid-template-columns: minmax(0, 1fr) 48px; align-items: center; border-bottom: 1px solid var(--line); }
+.drive-row.selected { background: var(--primary-soft); }
+.selection-indicator { display: none; width: 24px; height: 24px; border: 1.5px solid #b7c0d0; border-radius: 6px; color: #fff; align-items: center; justify-content: center; justify-self: center; }
+.selection-indicator .icon { width: 16px; height: 16px; }
+.selection-active .selection-indicator { display: inline-flex; }
+.selection-active .drive-row.selected .selection-indicator { border-color: var(--primary); background: var(--primary); }
+.selection-active .more-button { display: none; }
+.selection-active .drive-main { cursor: pointer; }
 .drive-row:last-child { border-bottom: 0; }
 .drive-main { min-width: 0; height: 100%; padding: 10px 0 10px 14px; border: 0; background: transparent; display: flex; align-items: center; gap: 12px; text-align: left; }
 .drive-main:active { background: var(--surface-subtle); }
