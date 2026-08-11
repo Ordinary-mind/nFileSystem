@@ -69,8 +69,16 @@
 .progress-track { height: 8px; overflow: hidden; border-radius: 4px; background: #e8ecf3; }
 .progress-value { height: 100%; width: 0; background: var(--primary); transition: width 160ms linear; }
 .upload-progress p { margin: 14px 0 0; text-align: center; color: var(--muted); }
-.image-preview { min-height: 100%; display: flex; align-items: center; justify-content: center; background: #11151b; margin: -18px; }
-.image-preview img { display: block; max-width: 100%; max-height: calc(100dvh - 58px); object-fit: contain; }
+.overlay-body.image-preview-body { padding: 0; overflow: hidden; }
+.image-preview-canvas { position: relative; width: 100%; height: 100%; overflow: hidden; display: flex; align-items: center; justify-content: center; background: #11151b; touch-action: none; cursor: default; outline: none; }
+.image-preview-canvas.is-zoomed { cursor: grab; }
+.image-preview-canvas.is-zoomed:active { cursor: grabbing; }
+.image-preview-canvas img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; will-change: transform; transform-origin: center center; }
+.image-preview-controls { position: absolute; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); transform: translateX(-50%); min-height: 42px; padding: 4px; border-radius: 9px; display: flex; align-items: center; gap: 2px; color: #fff; background: rgba(17, 21, 27, 0.78); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28); backdrop-filter: blur(8px); }
+.image-preview-controls button { min-width: 40px; height: 36px; padding: 0 9px; border: 0; border-radius: 6px; color: #fff; background: transparent; font-size: 18px; }
+.image-preview-controls button:last-child { font-size: 12px; }
+.image-preview-controls button:disabled { opacity: 0.35; }
+.image-preview-controls span { min-width: 50px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
 .text-preview { margin: 0; padding: 14px; border-radius: 8px; background: #f6f7f9; color: #252b35; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .move-breadcrumb { border-bottom: 1px solid var(--line); margin: -18px -18px 8px; padding: 8px 14px; }
 .move-breadcrumb > span { color: #aeb6c4; }

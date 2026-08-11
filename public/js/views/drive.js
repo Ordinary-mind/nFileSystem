@@ -3,6 +3,7 @@ import { fileIconName, icon } from '../core/icons.js';
 import { escapeHtml, formatDate, formatSize, getExtension, hasPressMoved, selectionKey } from '../core/utils.js';
 import { confirmDialog, errorView, loadingView, openActionSheet, openOverlay, promptText, showToast } from '../core/ui.js';
 import { uploadFiles } from '../features/upload.js';
+import { mountImageViewer } from '../features/image-viewer.js';
 
 const TEXT_EXTENSIONS = new Set(['txt', 'md', 'json', 'js', 'ts', 'css', 'html', 'xml', 'yml', 'yaml', 'conf', 'ini', 'sh', 'bat', 'log', 'csv', 'env']);
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg', 'ico']);
@@ -235,14 +236,25 @@ export function mountDrive(root, folderId, navigate) {
 
   async function previewFile(item) {
     const ext = getExtension(item.name).toLowerCase();
-    const panel = openOverlay({ title: item.name, content: loadingView('正在加载文件'), variant: 'full' });
+    let objectUrl = '';
+    let destroyViewer = () => {};
+    const panel = openOverlay({
+      title: item.name,
+      content: loadingView('正在加载文件'),
+      variant: 'full',
+      onClose: () => {
+        destroyViewer();
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+      },
+    });
     const body = panel.overlay.querySelector('.overlay-body');
     try {
       const blob = await requestBlob(`/files/${item.md5}/download`);
+      if (!panel.overlay.isConnected) return;
       if (IMAGE_EXTENSIONS.has(ext)) {
-        const url = URL.createObjectURL(blob);
-        body.innerHTML = `<div class="image-preview"><img src="${url}" alt=""></div>`;
-        panel.overlay.querySelector('[data-close]').addEventListener('click', () => URL.revokeObjectURL(url), { once: true });
+        objectUrl = URL.createObjectURL(blob);
+        body.classList.add('image-preview-body');
+        destroyViewer = mountImageViewer(body, objectUrl, item.name);
       } else if (TEXT_EXTENSIONS.has(ext)) {
         body.innerHTML = `<pre class="text-preview">${escapeHtml(await blob.text())}</pre>`;
       } else {

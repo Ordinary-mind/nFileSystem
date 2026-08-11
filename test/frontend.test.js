@@ -8,6 +8,11 @@ async function loadUtils() {
   return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 }
 
+async function loadImageViewer() {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'features', 'image-viewer.js'), 'utf8');
+  return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+}
+
 test('移动端路由解析保持稳定', async () => {
   const { parseRoute } = await loadUtils();
   assert.deepEqual(parseRoute('#/files/42'), { section: 'files', id: '42' });
@@ -33,4 +38,19 @@ test('认证页面提供邮箱验证码和密码管理入口', () => {
   assert.match(authSource, /\/auth\/email-codes/);
   assert.match(authSource, /reset_password/);
   assert.match(profileSource, /\/auth\/password\/change/);
+});
+
+test('图片预览缩放围绕焦点并限制平移边界', async () => {
+  const { constrainImageTransform, zoomImageAt } = await loadImageViewer();
+  const imageSize = { width: 300, height: 200 };
+  const viewportSize = { width: 300, height: 200 };
+  assert.deepEqual(
+    constrainImageTransform({ scale: 2, x: 999, y: -999 }, imageSize, viewportSize),
+    { scale: 2, x: 150, y: -100 }
+  );
+  assert.deepEqual(
+    zoomImageAt({ scale: 1, x: 0, y: 0 }, 2, { x: 50, y: 0 }, imageSize, viewportSize),
+    { scale: 2, x: -50, y: 0 }
+  );
+  assert.equal(constrainImageTransform({ scale: 9, x: 0, y: 0 }, imageSize, viewportSize).scale, 5);
 });
