@@ -8,11 +8,14 @@ import { mountImageViewer } from '../features/image-viewer.js';
 const TEXT_EXTENSIONS = new Set(['txt', 'md', 'json', 'js', 'ts', 'css', 'html', 'xml', 'yml', 'yaml', 'conf', 'ini', 'sh', 'bat', 'log', 'csv', 'env']);
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg', 'ico']);
 
-export function mountDrive(root, folderId, navigate) {
+export function mountDrive(root, folderId, navigate, route = {}) {
   let folders = [];
   let files = [];
   let offset = 0;
-  let search = '';
+  let search = String(route.search || '');
+  let searchScope = route.scope === 'current' ? 'current' : 'all';
+  let searchCursor = null;
+  let searchResults = [];
   let hasMore = false;
   let requestId = 0;
   const currentFolderId = folderId || null;
@@ -21,6 +24,8 @@ export function mountDrive(root, folderId, navigate) {
   let longPressRow = null;
   let longPressStart = null;
   let suppressClickUntil = 0;
+  const routeKey = window.location.hash;
+  const cachedState = JSON.parse(sessionStorage.getItem(`drive:${routeKey}`) || 'null');
 
   root.innerHTML = `
     <div class="top-bar ${currentFolderId ? '' : 'no-back'}" data-normal-bar>
@@ -33,8 +38,8 @@ export function mountDrive(root, folderId, navigate) {
       <div><h1 data-selection-summary>已选择 0 项</h1><div class="top-bar-subtitle">长按或点按选择项目</div></div>
       <button type="button" class="icon-button danger-icon" data-selection-delete aria-label="删除选中项">${icon('trash')}</button>
     </div>
-    <div class="search-panel hidden" data-search-panel>
-      ${icon('search')}<input type="search" placeholder="搜索当前目录" aria-label="搜索当前目录"><button type="button" data-clear>清除</button>
+    <div class="search-panel ${search ? '' : 'hidden'}" data-search-panel>
+      ${icon('search')}<input type="search" value="${escapeHtml(search)}" placeholder="搜索全部文件" aria-label="搜索文件"><select aria-label="搜索范围"><option value="all" ${searchScope === 'all' ? 'selected' : ''}>全部</option><option value="current" ${searchScope === 'current' ? 'selected' : ''}>当前目录</option></select><button type="button" data-clear>关闭</button>
     </div>
     <div class="breadcrumb-strip" data-breadcrumb></div>
     <div class="drive-list" data-list>${loadingView()}</div>
@@ -47,6 +52,7 @@ export function mountDrive(root, folderId, navigate) {
   const breadcrumb = root.querySelector('[data-breadcrumb]');
   const searchPanel = root.querySelector('[data-search-panel]');
   const searchInput = searchPanel.querySelector('input');
+  const searchSelect = searchPanel.querySelector('select');
   const fileInput = root.querySelector('[data-file-input]');
   const normalBar = root.querySelector('[data-normal-bar]');
   const selectionBar = root.querySelector('[data-selection-bar]');
@@ -56,6 +62,9 @@ export function mountDrive(root, folderId, navigate) {
   const createButton = root.querySelector('[data-create]');
 
   function goFolder(id) {
+    sessionStorage.setItem(`drive:${window.location.hash}`, JSON.stringify({
+      folders, files, searchResults, offset, searchCursor, hasMore, scrollY: window.scrollY,
+    }));
     navigate(id ? `files/${id}` : 'files');
   }
 
@@ -74,6 +83,17 @@ export function mountDrive(root, folderId, navigate) {
   }
 
   function renderList() {
+    if (search) {
+      summary.textContent = `找到 ${searchResults.length} 项`;
+      if (!searchResults.length && !hasMore) {
+        list.innerHTML = `<div class="empty-drive">${icon('search')}<h2>没有匹配项</h2><p>尝试其他关键词</p></div>`;
+        return;
+      }
+      list.innerHTML = `${searchResults.map((item) => rowTemplate(item)).join('')}${hasMore ? '<button type="button" class="load-more-button" data-load-more>加载更多</button>' : ''}`;
+      list.querySelector('[data-load-more]')?.addEventListener('click', (event) => { event.currentTarget.disabled = true; load(true); });
+      mountThumbnails();
+      return;
+    }
     summary.textContent = `${folders.length} 个文件夹，${files.length} 个文件`;
     if (!folders.length && !files.length && !hasMore) {
       list.innerHTML = `<div class="empty-drive">${icon('folder')}<h2>${search ? '没有匹配项' : '这里还没有文件'}</h2><p>${search ? '尝试其他关键词' : '点击右下角添加内容'}</p></div>`;
@@ -82,6 +102,7 @@ export function mountDrive(root, folderId, navigate) {
     const folderRows = folders.map((item) => rowTemplate({ ...item, type: 'folder' })).join('');
     const fileRows = files.map((item) => rowTemplate({ ...item, type: 'file' })).join('');
     list.innerHTML = `${folderRows}${fileRows}${hasMore ? '<button type="button" class="load-more-button" data-load-more>加载更多</button>' : ''}`;
+    mountThumbnails();
     list.querySelector('[data-load-more]')?.addEventListener('click', (event) => {
       event.currentTarget.disabled = true;
       load(true);
@@ -90,16 +111,46 @@ export function mountDrive(root, folderId, navigate) {
 
   function rowTemplate(item) {
     const isFolder = item.type === 'folder';
-    const meta = isFolder ? `文件夹 · ${formatDate(item.created_at)}` : `${formatSize(item.size)} · ${escapeHtml(getExtension(item.name).toUpperCase() || '文件')} · ${formatDate(item.created_at)}`;
+    const meta = search
+      ? `${isFolder ? '文件夹' : formatSize(item.size)} · ${escapeHtml(item.path || '/')}`
+      : (isFolder ? `文件夹 · ${formatDate(item.created_at)}` : `${formatSize(item.size)} · ${escapeHtml(getExtension(item.name).toUpperCase() || '文件')} · ${formatDate(item.created_at)}`);
+    const thumbnail = !isFolder && /^image\/(jpeg|png|webp|gif|avif)$/i.test(item.mime_type || '')
+      ? ` data-thumbnail="${escapeHtml(item.md5)}"` : '';
     return `
-      <article class="drive-row ${selected.has(selectionKey(item)) ? 'selected' : ''}" data-type="${item.type}" data-id="${item.id}" data-name="${escapeHtml(item.name)}" data-md5="${escapeHtml(item.md5 || '')}">
+      <article class="drive-row ${selected.has(selectionKey(item)) ? 'selected' : ''}" data-type="${item.type}" data-id="${item.id}" data-name="${escapeHtml(item.name)}" data-md5="${escapeHtml(item.md5 || '')}" data-mime-type="${escapeHtml(item.mime_type || '')}">
         <button type="button" class="drive-main" data-open>
-          <span class="file-symbol ${isFolder ? 'folder-symbol' : ''}">${icon(isFolder ? 'folder' : fileIconName(item.name))}</span>
+          <span class="file-symbol ${isFolder ? 'folder-symbol' : ''}"${thumbnail}>${icon(isFolder ? 'folder' : fileIconName(item.name))}</span>
           <span class="drive-text"><strong>${escapeHtml(item.name)}</strong><small>${meta}</small></span>
         </button>
         <span class="selection-indicator" aria-hidden="true">${icon('check')}</span>
         <button type="button" class="icon-button more-button" data-more aria-label="更多操作">${icon('more')}</button>
       </article>`;
+  }
+
+  function mountThumbnails() {
+    if (!('IntersectionObserver' in window)) return;
+    const observer = new IntersectionObserver((entries) => {
+      entries.filter((entry) => entry.isIntersecting).forEach(async (entry) => {
+        const symbol = entry.target;
+        observer.unobserve(symbol);
+        const controller = new AbortController();
+        try {
+          const blob = await requestBlob(`/files/${symbol.dataset.thumbnail}/thumbnail`, { signal: controller.signal });
+          if (!symbol.isConnected) return;
+          const url = URL.createObjectURL(blob);
+          const image = new Image();
+          image.alt = '';
+          image.onload = () => URL.revokeObjectURL(url);
+          image.onerror = () => URL.revokeObjectURL(url);
+          image.src = url;
+          symbol.replaceChildren(image);
+          symbol.classList.add('has-thumbnail');
+        } catch {
+          // 不支持或损坏的图片保留原文件图标。
+        }
+      });
+    }, { rootMargin: '240px 0px' });
+    list.querySelectorAll('[data-thumbnail]').forEach((node) => observer.observe(node));
   }
 
   function updateSelectionView() {
@@ -131,12 +182,15 @@ export function mountDrive(root, folderId, navigate) {
     updateSelectionView();
   }
 
-  async function load(append = false) {
+  async function load(append = false, preserveDisplay = false) {
+    if (search) return loadSearch(append);
     if (!append) {
-      folders = [];
-      files = [];
       offset = 0;
-      list.innerHTML = loadingView();
+      if (!preserveDisplay) {
+        folders = [];
+        files = [];
+        list.innerHTML = loadingView();
+      }
     }
     const activeRequest = ++requestId;
     const params = new URLSearchParams({ offset: String(offset) });
@@ -156,6 +210,30 @@ export function mountDrive(root, folderId, navigate) {
     }
   }
 
+  async function loadSearch(append = false) {
+    if (!append) {
+      searchResults = [];
+      searchCursor = null;
+      list.innerHTML = loadingView();
+    }
+    const activeRequest = ++requestId;
+    const params = new URLSearchParams({ q: search, scope: searchScope, limit: '50' });
+    if (currentFolderId) params.set('folderId', currentFolderId);
+    if (searchCursor) params.set('cursor', searchCursor);
+    try {
+      const data = await request(`/drive/search?${params}`);
+      if (activeRequest !== requestId) return;
+      searchResults = append ? searchResults.concat(data.results || []) : (data.results || []);
+      searchCursor = data.page?.nextCursor || null;
+      hasMore = Boolean(searchCursor);
+      breadcrumb.classList.add('hidden');
+      title.textContent = '搜索';
+      renderList();
+    } catch (error) {
+      if (activeRequest === requestId) list.innerHTML = errorView(error.message || '搜索失败');
+    }
+  }
+
   async function createFolder() {
     const name = await promptText({ title: '新建文件夹', label: '文件夹名称', submitLabel: '创建' });
     if (!name) return;
@@ -167,13 +245,60 @@ export function mountDrive(root, folderId, navigate) {
   }
 
   async function renameItem(item) {
-    const name = await promptText({ title: `重命名${item.type === 'folder' ? '文件夹' : '文件'}`, label: '新名称', value: item.name, submitLabel: '保存' });
+    let name;
+    if (item.type === 'file') {
+      name = await promptFileName(item.name);
+    } else {
+      name = await promptText({ title: '重命名文件夹', label: '新名称', value: item.name, submitLabel: '保存' });
+    }
     if (!name || name === item.name) return;
     try {
       await request(`/drive/${item.type}/${item.id}`, { method: 'PUT', body: { name } });
       showToast('重命名成功');
       load();
     } catch (error) { showToast(error.message, 'error'); }
+  }
+
+  function promptFileName(originalName) {
+    return new Promise((resolve) => {
+      const lastDot = originalName.lastIndexOf('.');
+      const hasExtension = lastDot > 0 && lastDot < originalName.length - 1;
+      const baseName = hasExtension ? originalName.slice(0, lastDot) : originalName;
+      const extension = hasExtension ? originalName.slice(lastDot) : '';
+      const panel = openOverlay({
+        title: '重命名文件',
+        content: `
+          <form class="dialog-form" data-rename-form>
+            <label class="field-label" for="rename-base">文件名</label>
+            <div class="filename-field">
+              <input id="rename-base" class="text-field" name="base" value="${escapeHtml(baseName)}" autocomplete="off" required>
+              ${extension ? `<span data-extension>${escapeHtml(extension)}</span>` : ''}
+            </div>
+            ${extension ? '<button type="button" class="text-button filename-extension-toggle" data-edit-extension>修改扩展名</button>' : ''}
+            <p class="field-hint">扩展名决定文件类型，默认保持不变。</p>
+          </form>`,
+        submitLabel: '保存',
+        onClose: () => resolve(null),
+        onSubmit: ({ overlay, close }) => {
+          const base = overlay.querySelector('[name="base"]').value.trim();
+          const enteredExtension = overlay.querySelector('[name="extension"]')?.value.trim();
+          const suffix = enteredExtension === undefined || enteredExtension === ''
+            ? (enteredExtension === undefined ? extension : '')
+            : (enteredExtension.startsWith('.') ? enteredExtension : `.${enteredExtension}`);
+          if (!base) return overlay.querySelector('[name="base"]').focus();
+          close(false);
+          resolve(`${base}${suffix}`);
+        },
+      });
+      const submit = () => panel.overlay.querySelector('[data-submit]').click();
+      panel.overlay.querySelector('[data-rename-form]').addEventListener('submit', (event) => { event.preventDefault(); submit(); });
+      panel.overlay.querySelector('[data-edit-extension]')?.addEventListener('click', (event) => {
+        const wrapper = panel.overlay.querySelector('.filename-field');
+        wrapper.querySelector('[data-extension]').outerHTML = `<input class="text-field filename-extension-input" name="extension" value="${escapeHtml(extension)}" aria-label="扩展名">`;
+        event.currentTarget.remove();
+        wrapper.querySelector('[name="extension"]').focus();
+      });
+    });
   }
 
   async function deleteItem(item) {
@@ -245,14 +370,24 @@ export function mountDrive(root, folderId, navigate) {
       onClose: () => {
         destroyViewer();
         if (objectUrl) URL.revokeObjectURL(objectUrl);
+        if (window.history.state?.drivePreview) window.history.back();
       },
     });
+    const previewState = { ...(window.history.state || {}), drivePreview: true };
+    window.history.pushState(previewState, '', window.location.href);
+    const onPopState = () => {
+      panel.close();
+    };
+    window.addEventListener('popstate', onPopState, { once: true });
     const body = panel.overlay.querySelector('.overlay-body');
     try {
       const blob = await requestBlob(`/files/${item.md5}/download`);
       if (!panel.overlay.isConnected) return;
       if (IMAGE_EXTENSIONS.has(ext)) {
-        objectUrl = URL.createObjectURL(blob);
+        const previewBlob = ext === 'svg' && blob.type !== 'image/svg+xml'
+          ? new Blob([blob], { type: 'image/svg+xml' })
+          : blob;
+        objectUrl = URL.createObjectURL(previewBlob);
         body.classList.add('image-preview-body');
         destroyViewer = mountImageViewer(body, objectUrl, item.name);
       } else if (TEXT_EXTENSIONS.has(ext)) {
@@ -286,33 +421,51 @@ export function mountDrive(root, folderId, navigate) {
 
   function openMove(item) {
     let targetFolderId = null;
+    let targetPath = '根目录';
+    let folderLoaded = false;
     const panel = openOverlay({
       title: '移动到', variant: 'full', submitLabel: '移动到此处', content: `<div data-move-breadcrumb></div><div data-move-list>${loadingView()}</div>`,
       onSubmit: async ({ close }) => {
+        if (!folderLoaded) return;
+        const submitButton = panel.overlay.querySelector('[data-submit]');
+        submitButton.disabled = true;
         try {
           await request('/drive/move', { method: 'POST', body: { type: item.type, id: item.id, targetFolderId } });
           close();
-          showToast('移动成功');
+          showToast(`已移动到${targetPath}`);
           load();
-        } catch (error) { showToast(error.message, 'error'); }
+        } catch (error) {
+          showToast(error.message, 'error');
+          submitButton.disabled = !folderLoaded;
+        }
       },
     });
     const moveList = panel.overlay.querySelector('[data-move-list]');
     const moveBreadcrumb = panel.overlay.querySelector('[data-move-breadcrumb]');
+    const moveSubmit = panel.overlay.querySelector('[data-submit]');
+    moveSubmit.disabled = true;
     async function loadFolders() {
+      folderLoaded = false;
+      moveSubmit.disabled = true;
       moveList.innerHTML = loadingView();
       const params = new URLSearchParams({ limit: '500' });
       if (targetFolderId) params.set('folderId', targetFolderId);
       try {
         const data = await request(`/drive?${params}`);
         const crumbs = [{ id: '', name: '根目录' }, ...(data.breadcrumb || [])];
+        targetPath = crumbs.map((crumb) => crumb.name).join(' / ');
         moveBreadcrumb.className = 'breadcrumb-strip move-breadcrumb';
         moveBreadcrumb.innerHTML = crumbs.map((crumb) => `<button type="button" data-id="${crumb.id}">${escapeHtml(crumb.name)}</button>`).join('<span>/</span>');
         moveBreadcrumb.querySelectorAll('[data-id]').forEach((button) => button.addEventListener('click', () => { targetFolderId = button.dataset.id || null; loadFolders(); }));
         const available = (data.folders || []).filter((folder) => !(item.type === 'folder' && String(folder.id) === String(item.id)));
         moveList.innerHTML = available.length ? available.map((folder) => `<button type="button" class="move-folder-row" data-id="${folder.id}">${icon('folder')}<span>${escapeHtml(folder.name)}</span>${icon('chevron')}</button>`).join('') : '<div class="state-view"><p>此处没有子文件夹</p></div>';
         moveList.querySelectorAll('.move-folder-row').forEach((button) => button.addEventListener('click', () => { targetFolderId = button.dataset.id; loadFolders(); }));
-      } catch (error) { moveList.innerHTML = errorView(error.message); }
+        folderLoaded = true;
+        moveSubmit.disabled = false;
+      } catch (error) {
+        moveList.innerHTML = `${errorView(error.message)}<button type="button" class="secondary-button move-retry" data-retry>重新加载</button>`;
+        moveList.querySelector('[data-retry]').addEventListener('click', loadFolders);
+      }
     }
     loadFolders();
   }
@@ -352,7 +505,7 @@ export function mountDrive(root, folderId, navigate) {
     }
     const row = event.target.closest('.drive-row');
     if (!row) return;
-    const item = { type: row.dataset.type, id: row.dataset.id, name: row.dataset.name, md5: row.dataset.md5 };
+    const item = { type: row.dataset.type, id: row.dataset.id, name: row.dataset.name, md5: row.dataset.md5, mime_type: row.dataset.mimeType };
     if (selected.size) toggleSelection(item);
     else if (event.target.closest('[data-more]')) openItemActions(item);
     else if (event.target.closest('[data-open]')) item.type === 'folder' ? goFolder(item.id) : previewFile(item);
@@ -365,7 +518,7 @@ export function mountDrive(root, folderId, navigate) {
     window.clearTimeout(longPressTimer);
     longPressTimer = window.setTimeout(() => {
       if (!longPressRow?.isConnected) return;
-      const item = { type: row.dataset.type, id: row.dataset.id, name: row.dataset.name, md5: row.dataset.md5 };
+      const item = { type: row.dataset.type, id: row.dataset.id, name: row.dataset.name, md5: row.dataset.md5, mime_type: row.dataset.mimeType };
       toggleSelection(item);
       suppressClickUntil = Date.now() + 700;
       navigator.vibrate?.(25);
@@ -397,8 +550,38 @@ export function mountDrive(root, folderId, navigate) {
   let searchTimer = null;
   searchInput.addEventListener('input', () => {
     window.clearTimeout(searchTimer);
-    searchTimer = window.setTimeout(() => { search = searchInput.value.trim(); load(); }, 300);
+    searchTimer = window.setTimeout(() => {
+      search = searchInput.value.trim();
+      const params = new URLSearchParams();
+      if (search) params.set('q', search);
+      if (searchScope === 'current') params.set('scope', 'current');
+      const path = currentFolderId ? `files/${currentFolderId}` : 'files';
+      window.history.replaceState(null, '', `#/${path}${params.size ? `?${params}` : ''}`);
+      load();
+    }, 300);
   });
-  searchPanel.querySelector('[data-clear]').addEventListener('click', () => { searchInput.value = ''; search = ''; load(); });
-  load();
+  searchSelect.addEventListener('change', () => {
+    searchScope = searchSelect.value;
+    searchInput.dispatchEvent(new Event('input'));
+  });
+  searchPanel.querySelector('[data-clear]').addEventListener('click', () => {
+    searchInput.value = '';
+    search = '';
+    searchPanel.classList.add('hidden');
+    const path = currentFolderId ? `files/${currentFolderId}` : 'files';
+    window.history.replaceState(null, '', `#/${path}`);
+    load();
+  });
+  if (cachedState) {
+    ({ folders = [], files = [], searchResults = [], offset = 0, searchCursor = null, hasMore = false } = cachedState);
+    if (search) renderList();
+    else {
+      request(`/drive${currentFolderId ? `?folderId=${currentFolderId}` : ''}`).then((data) => renderBreadcrumb(data.breadcrumb || []));
+      renderList();
+    }
+    requestAnimationFrame(() => window.scrollTo(0, cachedState.scrollY || 0));
+    sessionStorage.removeItem(`drive:${routeKey}`);
+    // 缓存只负责立即恢复界面，随后静默校准移动、重命名等最新变更。
+    if (!search) load(false, true);
+  } else load();
 }

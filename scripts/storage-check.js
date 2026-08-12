@@ -14,12 +14,14 @@ const {
   verifyFileRecord,
   unlinkIfExists,
 } = require('../src/storage');
+const { thumbnailRoot, getThumbnailPath } = require('../src/thumbnail');
 
 const quick = process.argv.includes('--quick');
 const cleanOrphans = process.argv.includes('--clean-orphans');
 
 async function collectPhysicalFiles(rootDir) {
   const files = [];
+  if (!fs.existsSync(rootDir)) return files;
   const pending = [rootDir];
   while (pending.length) {
     const current = pending.pop();
@@ -135,10 +137,16 @@ async function main() {
 
   const physicalFiles = await collectPhysicalFiles(uploadRoot);
   const orphans = physicalFiles.filter((filePath) => !expectedPaths.has(path.resolve(filePath)));
+  const expectedThumbnails = new Set(records.map((record) => path.resolve(getThumbnailPath(record))));
+  const thumbnailFiles = await collectPhysicalFiles(thumbnailRoot);
+  const orphanThumbnails = thumbnailFiles.filter((filePath) => !expectedThumbnails.has(path.resolve(filePath)));
   let cleaned = 0;
   if (cleanOrphans) {
     // 只清理不在数据库期望集合中的普通文件，临时目录由服务按时效单独回收。
     for (const filePath of orphans) {
+      if (await unlinkIfExists(filePath)) cleaned++;
+    }
+    for (const filePath of orphanThumbnails) {
       if (await unlinkIfExists(filePath)) cleaned++;
     }
   }
@@ -148,6 +156,7 @@ async function main() {
   console.log(`逻辑引用异常: ${logicalIssues.length}`);
   console.log(`异常文件记录: ${invalid.length}`);
   console.log(`无引用物理文件: ${orphans.length}${cleanOrphans ? `，已清理 ${cleaned}` : ''}`);
+  console.log(`无引用缩略图: ${orphanThumbnails.length}`);
   for (const item of invalid.slice(0, 20)) {
     console.error(`- file_id=${item.id}: ${item.reason}${item.path ? ` (${item.path})` : ''}`);
   }
@@ -155,7 +164,8 @@ async function main() {
     console.error(`- record_id=${item.id ?? 'unknown'}: ${item.reason}`);
   }
   for (const filePath of orphans.slice(0, 20)) console.error(`- orphan: ${filePath}`);
-  if (invalid.length || logicalIssues.length || (orphans.length && !cleanOrphans)) process.exitCode = 1;
+  for (const filePath of orphanThumbnails.slice(0, 20)) console.error(`- orphan thumbnail: ${filePath}`);
+  if (invalid.length || logicalIssues.length || ((orphans.length || orphanThumbnails.length) && !cleanOrphans)) process.exitCode = 1;
 }
 
 main()

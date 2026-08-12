@@ -28,9 +28,10 @@
 .form-message.error { color: var(--danger); }
 .form-message.success { color: var(--success); }
 
-.search-panel { margin: 10px 14px 0; height: 46px; display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 0 8px 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.search-panel { margin: 10px 14px 0; min-height: 46px; display: grid; grid-template-columns: 26px minmax(0, 1fr) auto auto; align-items: center; gap: 7px; padding: 0 8px 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .search-panel .icon { width: 19px; height: 19px; color: var(--muted); }
 .search-panel input { min-width: 0; border: 0; outline: 0; background: transparent; font-size: 15px; }
+.search-panel select { max-width: 88px; height: 34px; border: 0; border-radius: 6px; background: var(--surface-subtle); color: var(--muted); font-size: 12px; }
 .search-panel button { height: 36px; padding: 0 8px; border: 0; background: transparent; color: var(--primary); font-size: 13px; }
 .breadcrumb-strip { min-height: 38px; padding: 7px 14px; display: flex; align-items: center; gap: 4px; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
 .breadcrumb-strip::-webkit-scrollbar { display: none; }
@@ -52,6 +53,8 @@
 .drive-main:active { background: var(--surface-subtle); }
 .file-symbol { width: 42px; height: 42px; border-radius: 8px; background: #f1f4f9; color: #60708a; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; }
 .file-symbol .icon { width: 24px; height: 24px; }
+.file-symbol.has-thumbnail { overflow: hidden; background: #e8ecf3; }
+.file-symbol.has-thumbnail img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .folder-symbol { background: #fff4d8; color: #b67500; }
 .drive-text { min-width: 0; display: grid; gap: 5px; }
 .drive-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
@@ -86,6 +89,13 @@
 .move-folder-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .move-folder-row > .icon:first-child { color: #b67500; }
 .move-folder-row > .icon:last-child { width: 18px; color: var(--muted); }
+.move-retry { display: block; margin: 0 auto 18px; }
+.filename-field { display: flex; align-items: center; gap: 7px; }
+.filename-field > .text-field:first-child { min-width: 0; }
+.filename-field > span { max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 14px; }
+.filename-extension-input { width: min(42%, 140px); }
+.filename-extension-toggle { width: max-content; padding: 0; border: 0; background: transparent; color: var(--primary); font-size: 13px; }
+.field-hint { margin: -2px 0 0; color: var(--muted); font-size: 12px; }
 
 .integrations-page { padding: 14px 14px calc(var(--nav-height) + env(safe-area-inset-bottom) + 18px); }
 .integration-list { display: grid; gap: 10px; }

@@ -235,6 +235,65 @@ async function createIntegrityTriggers() {
   `);
 }
 
+async function createSearchIndex() {
+  await rawExec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS drive_search USING fts5(
+      name,
+      entity_type UNINDEXED,
+      entity_id UNINDEXED,
+      user_id UNINDEXED,
+      parent_id UNINDEXED,
+      tokenize='trigram'
+    );
+
+    DROP TRIGGER IF EXISTS trg_search_folder_insert;
+    DROP TRIGGER IF EXISTS trg_search_folder_update;
+    DROP TRIGGER IF EXISTS trg_search_folder_delete;
+    DROP TRIGGER IF EXISTS trg_search_file_insert;
+    DROP TRIGGER IF EXISTS trg_search_file_update;
+    DROP TRIGGER IF EXISTS trg_search_file_delete;
+
+    CREATE TRIGGER trg_search_folder_insert AFTER INSERT ON user_folders BEGIN
+      INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
+      VALUES (NEW.name, 'folder', NEW.id, NEW.user_id, NEW.parent_id);
+    END;
+    CREATE TRIGGER trg_search_folder_update AFTER UPDATE OF name, user_id, parent_id ON user_folders BEGIN
+      DELETE FROM drive_search WHERE entity_type = 'folder' AND entity_id = OLD.id;
+      INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
+      VALUES (NEW.name, 'folder', NEW.id, NEW.user_id, NEW.parent_id);
+    END;
+    CREATE TRIGGER trg_search_folder_delete AFTER DELETE ON user_folders BEGIN
+      DELETE FROM drive_search WHERE entity_type = 'folder' AND entity_id = OLD.id;
+    END;
+    CREATE TRIGGER trg_search_file_insert AFTER INSERT ON user_files BEGIN
+      INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
+      VALUES (NEW.name, 'file', NEW.id, NEW.user_id, NEW.folder_id);
+    END;
+    CREATE TRIGGER trg_search_file_update AFTER UPDATE OF name, user_id, folder_id ON user_files BEGIN
+      DELETE FROM drive_search WHERE entity_type = 'file' AND entity_id = OLD.id;
+      INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
+      VALUES (NEW.name, 'file', NEW.id, NEW.user_id, NEW.folder_id);
+    END;
+    CREATE TRIGGER trg_search_file_delete AFTER DELETE ON user_files BEGIN
+      DELETE FROM drive_search WHERE entity_type = 'file' AND entity_id = OLD.id;
+    END;
+  `);
+
+  const counts = await rawGet(`
+    SELECT (SELECT COUNT(*) FROM user_folders) + (SELECT COUNT(*) FROM user_files) AS source_count,
+           (SELECT COUNT(*) FROM drive_search) AS index_count
+  `);
+  if (counts.source_count !== counts.index_count) {
+    await rawRun('DELETE FROM drive_search');
+    await rawExec(`
+      INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
+      SELECT name, 'folder', id, user_id, parent_id FROM user_folders;
+      INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
+      SELECT name, 'file', id, user_id, folder_id FROM user_files;
+    `);
+  }
+}
+
 async function initDb() {
   return enqueue(async () => {
     await rawGet('PRAGMA journal_mode = WAL');
@@ -379,7 +438,8 @@ async function initDb() {
         CREATE INDEX IF NOT EXISTS idx_verification_created ON verification_challenges(created_at);
       `);
       await createIntegrityTriggers();
-      await rawRun('PRAGMA user_version = 3');
+      await createSearchIndex();
+      await rawRun('PRAGMA user_version = 4');
       await rawRun('COMMIT');
     } catch (err) {
       await rawRun('ROLLBACK');
@@ -408,4 +468,5 @@ module.exports = {
   closeDb,
   db,
   dbPath,
+  dataDir,
 };

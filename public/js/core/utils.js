@@ -32,10 +32,17 @@ export function formatDate(value) {
 }
 
 export function parseRoute(hash = '') {
-  const clean = String(hash || '').replace(/^#\/?/, '').split('?')[0];
-  const parts = clean.split('/').filter(Boolean);
+  const clean = String(hash || '').replace(/^#\/?/, '');
+  const [pathname, query = ''] = clean.split('?');
+  const parts = pathname.split('/').filter(Boolean);
   const section = ['files', 'apps', 'me'].includes(parts[0]) ? parts[0] : 'files';
-  return { section, id: parts[1] || null };
+  const params = new URLSearchParams(query);
+  return {
+    section,
+    id: parts[1] || null,
+    search: params.get('q') || '',
+    scope: params.get('scope') === 'current' ? 'current' : 'all',
+  };
 }
 
 export function scopeLabel(scope) {

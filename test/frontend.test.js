@@ -15,9 +15,12 @@ async function loadImageViewer() {
 
 test('移动端路由解析保持稳定', async () => {
   const { parseRoute } = await loadUtils();
-  assert.deepEqual(parseRoute('#/files/42'), { section: 'files', id: '42' });
-  assert.deepEqual(parseRoute('#/apps/7'), { section: 'apps', id: '7' });
-  assert.deepEqual(parseRoute('#/unknown'), { section: 'files', id: null });
+  assert.deepEqual(parseRoute('#/files/42'), { section: 'files', id: '42', search: '', scope: 'all' });
+  assert.deepEqual(parseRoute('#/apps/7'), { section: 'apps', id: '7', search: '', scope: 'all' });
+  assert.deepEqual(parseRoute('#/unknown'), { section: 'files', id: null, search: '', scope: 'all' });
+  assert.deepEqual(parseRoute('#/files/42?q=%E6%8A%A5%E5%91%8A&scope=current'), {
+    section: 'files', id: '42', search: '报告', scope: 'current',
+  });
 });
 
 test('前端格式化与 HTML 转义正确', async () => {
@@ -53,4 +56,27 @@ test('图片预览缩放围绕焦点并限制平移边界', async () => {
     { scale: 2, x: -50, y: 0 }
   );
   assert.equal(constrainImageTransform({ scale: 9, x: 0, y: 0 }, imageSize, viewportSize).scale, 5);
+});
+
+test('SVG 预览会使用浏览器可识别的 MIME 类型', () => {
+  const driveSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'drive.js'), 'utf8');
+  assert.match(driveSource, /ext === 'svg'/);
+  assert.match(driveSource, /type: 'image\/svg\+xml'/);
+  assert.doesNotMatch(driveSource, /thumbnail.*image\/svg\+xml/i);
+});
+
+test('移动目录加载完成前禁止提交且重命名默认保护扩展名', () => {
+  const driveSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'drive.js'), 'utf8');
+  assert.match(driveSource, /let folderLoaded = false/);
+  assert.match(driveSource, /moveSubmit\.disabled = true/);
+  assert.match(driveSource, /folderLoaded = true;\s*moveSubmit\.disabled = false/);
+  assert.match(driveSource, /扩展名决定文件类型，默认保持不变/);
+  assert.match(driveSource, /data-edit-extension/);
+});
+
+test('普通目录命中历史缓存后仍会静默刷新最新列表', () => {
+  const driveSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'drive.js'), 'utf8');
+  assert.match(driveSource, /async function load\(append = false, preserveDisplay = false\)/);
+  assert.match(driveSource, /load\(false, true\)/);
+  assert.match(driveSource, /缓存只负责立即恢复界面/);
 });

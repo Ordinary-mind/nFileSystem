@@ -46,7 +46,7 @@ export function startApp() {
     });
 
     const root = app.querySelector('#view-root');
-    if (route.section === 'files') mountDrive(root, route.id, navigate);
+    if (route.section === 'files') mountDrive(root, route.id, navigate, route);
     else if (route.section === 'apps') mountIntegrations(root, route.id, navigate);
     else mountProfile(root, getSession().userEmail, () => logout(true), (token, email) => {
       saveSession(token, email);

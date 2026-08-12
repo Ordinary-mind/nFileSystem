@@ -7,6 +7,7 @@ const { after, before, test } = require('node:test');
 
 const bcrypt = require('bcrypt');
 const sqlite3 = require('sqlite3').verbose();
+const sharp = require('sharp');
 
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nfilesystem-test-'));
 const dataDir = path.join(testRoot, 'data');
@@ -174,7 +175,9 @@ after(async () => {
 
 test('旧数据库与 MD5 存储路径可自动升级并继续下载', async () => {
   const version = await dbModule.get('PRAGMA user_version');
-  assert.equal(version.user_version, 3);
+  assert.equal(version.user_version, 4);
+  const indexed = await dbModule.get("SELECT COUNT(*) AS count FROM drive_search WHERE name = 'legacy.txt'");
+  assert.equal(indexed.count, 1);
   const record = await dbModule.get('SELECT storage_key, sha256 FROM files WHERE md5 = ?', [legacyMd5]);
   assert.equal(record.storage_key, legacyMd5);
   assert.equal(record.sha256, null);
@@ -349,6 +352,69 @@ test('正常上传取得的共享内容不会被其他用户删除操作误回�
   const bobDownload = await api(`/files/${md5}/download`, { token: bobToken });
   assert.equal(bobDownload.response.status, 200);
   assert.deepEqual(bobDownload.data, content);
+});
+
+test('全局搜索返回完整路径、隔离用户并同步重命名', async () => {
+  const parentId = await createFolder(aliceToken, '搜索资料');
+  const childId = await createFolder(aliceToken, '项目报告', parentId);
+  const uploaded = await upload(aliceToken, '季度报告.txt', 'searchable report', childId);
+  assert.equal(uploaded.response.status, 200);
+
+  const global = await api('/drive/search?q=%E6%8A%A5%E5%91%8A&scope=all&limit=50', { token: aliceToken });
+  assert.equal(global.response.status, 200);
+  assert.deepEqual(global.data.results.map((item) => item.name).sort(), ['季度报告.txt', '项目报告']);
+  const file = global.data.results.find((item) => item.type === 'file');
+  assert.equal(file.path, '/搜索资料/项目报告');
+
+  const current = await api(`/drive/search?q=%E6%8A%A5%E5%91%8A&scope=current&folderId=${parentId}`, { token: aliceToken });
+  assert.deepEqual(current.data.results.map((item) => item.name), ['项目报告']);
+  const isolated = await api('/drive/search?q=%E6%8A%A5%E5%91%8A', { token: bobToken });
+  assert.equal(isolated.data.results.length, 0);
+
+  const renamed = await api(`/drive/file/${file.id}`, { method: 'PUT', token: aliceToken, body: { name: '最终版本.txt' } });
+  assert.equal(renamed.response.status, 200);
+  const oldSearch = await api('/drive/search?q=%E5%AD%A3%E5%BA%A6%E6%8A%A5%E5%91%8A', { token: aliceToken });
+  assert.equal(oldSearch.data.results.length, 0);
+  const newSearch = await api('/drive/search?q=%E6%9C%80%E7%BB%88%E7%89%88%E6%9C%AC', { token: aliceToken });
+  assert.equal(newSearch.data.results[0].name, '最终版本.txt');
+
+  await createFolder(aliceToken, 'a%b_特殊');
+  const special = await api('/drive/search?q=a%25b_%E7%89%B9%E6%AE%8A&limit=1', { token: aliceToken });
+  assert.equal(special.response.status, 200);
+  assert.equal(special.data.results[0].name, 'a%b_特殊');
+  await createFolder(aliceToken, '报告归档');
+  const firstPage = await api('/drive/search?q=%E6%8A%A5%E5%91%8A&limit=1', { token: aliceToken });
+  assert.equal(typeof firstPage.data.page.nextCursor, 'string');
+  const next = await api(`/drive/search?q=%E6%8A%A5%E5%91%8A&limit=1&cursor=${encodeURIComponent(firstPage.data.page.nextCursor)}`, { token: aliceToken });
+  assert.equal(next.response.status, 200);
+  assert.notEqual(next.data.results[0].id, firstPage.data.results[0].id);
+});
+
+test('图片缩略图按所有者鉴权并生成 160 像素 WebP 缓存', async () => {
+  const image = await sharp({
+    create: { width: 320, height: 180, channels: 3, background: { r: 30, g: 120, b: 210 } },
+  }).png().toBuffer();
+  const form = new FormData();
+  form.append('folderId', '');
+  form.append('files', new Blob([image], { type: 'image/png' }), 'thumbnail.png');
+  const uploaded = await api('/files/upload', { method: 'POST', token: aliceToken, form });
+  assert.equal(uploaded.response.status, 200);
+  const md5 = crypto.createHash('md5').update(image).digest('hex');
+
+  const denied = await api(`/files/${md5}/thumbnail`, { token: bobToken });
+  assert.equal(denied.response.status, 404);
+  const [first, concurrent] = await Promise.all([
+    api(`/files/${md5}/thumbnail`, { token: aliceToken }),
+    api(`/files/${md5}/thumbnail`, { token: aliceToken }),
+  ]);
+  assert.equal(first.response.status, 200);
+  assert.equal(concurrent.response.status, 200);
+  assert.equal(first.response.headers.get('content-type'), 'image/webp');
+  assert.match(first.response.headers.get('cache-control'), /immutable/);
+  const metadata = await sharp(first.data).metadata();
+  assert.equal(metadata.width, 160);
+  assert.equal(metadata.height, 160);
+  assert.equal(metadata.format, 'webp');
 });
 
 test('接入应用可通过独立 Token 隔离上传并创建访问链接', async () => {

@@ -74,6 +74,7 @@ npm start
 | `USER_QUOTA_BYTES` | 每用户逻辑文件配额，`0` 表示不限制 | `10737418240` |
 | `MIN_FREE_BYTES` | 上传后必须保留的磁盘空间 | `268435456` |
 | `DRIVE_PAGE_SIZE` | 每类目录项的默认分页大小 | `200` |
+| `THUMBNAIL_CONCURRENCY` | 服务端同时生成缩略图的数量（1-4） | `2` |
 | `MAX_FOLDER_DEPTH` | 最大文件夹深度 | `128` |
 | `STALE_TEMP_MAX_AGE_MS` | 上传临时文件保留时长 | `86400000` |
 | `AUTH_RATE_LIMIT` | 认证窗口内最大尝试次数 | `10` |

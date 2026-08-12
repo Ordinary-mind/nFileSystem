@@ -48,10 +48,11 @@ export async function request(path, options = {}) {
   return data;
 }
 
-export async function requestBlob(path) {
+export async function requestBlob(path, options = {}) {
   const { token } = getSession();
   const response = await fetch(path, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
+    signal: options.signal,
   });
   if (response.status === 401) unauthorizedHandler();
   if (!response.ok) {

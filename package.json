@@ -10,7 +10,8 @@
     "test": "node --test --test-concurrency=1",
     "storage:check": "node scripts/storage-check.js",
     "check:frontend": "node scripts/check-frontend.cjs",
-    "check": "node --check src/app.js && node --check src/db.js && node --check src/storage.js && node --check src/middleware/auth.js && node --check src/utils/security.js && node --check src/utils/email-verification.js && node --check src/utils/mailer.js && node --check scripts/storage-check.js && node --check scripts/check-frontend.cjs && node --check test/integration.test.js && node --check test/frontend.test.js && npm run check:frontend"
+    "benchmark:search": "node scripts/search-benchmark.js",
+    "check": "node --check src/app.js && node --check src/db.js && node --check src/storage.js && node --check src/thumbnail.js && node --check src/middleware/auth.js && node --check src/utils/security.js && node --check src/utils/email-verification.js && node --check src/utils/mailer.js && node --check scripts/storage-check.js && node --check scripts/check-frontend.cjs && node --check test/integration.test.js && node --check test/frontend.test.js && npm run check:frontend"
   },
   "keywords": [
     "express",
@@ -27,6 +28,7 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
     "nodemailer": "^9.0.5",
+    "sharp": "^0.35.3",
     "sqlite3": "^6.0.1",
     "validator": "^13.15.35"
   },

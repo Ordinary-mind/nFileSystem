@@ -33,6 +33,7 @@ const {
 const { hashPassword, comparePassword, signToken } = require('./utils/security');
 const { authRequired, apiTokenRequired, hashApiToken } = require('./middleware/auth');
 const { initializeMailer } = require('./utils/mailer');
+const { getOrCreateThumbnail, removeThumbnail } = require('./thumbnail');
 const {
   VerificationError,
   requestVerificationCode,
@@ -532,6 +533,7 @@ async function removePhysicalFiles(records) {
   for (const record of records) {
     try {
       await unlinkIfExists(getStoragePath(record));
+      await removeThumbnail(record);
     } catch (err) {
       console.error(`清理物理文件失败 (file_id=${record.id}):`, err.message);
     }
@@ -1302,6 +1304,80 @@ app.get('/drive', authRequired, asyncRoute(async (req, res) => {
   res.json(data);
 }));
 
+function encodeSearchCursor(row) {
+  return Buffer.from(JSON.stringify([row.name_key, row.type, Number(row.id)]), 'utf8').toString('base64url');
+}
+
+function decodeSearchCursor(value) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8'));
+    if (!Array.isArray(parsed) || parsed.length !== 3 || typeof parsed[0] !== 'string'
+      || !['file', 'folder'].includes(parsed[1]) || !Number.isSafeInteger(parsed[2])) throw new Error();
+    return parsed;
+  } catch {
+    throw new HttpError(400, 'cursor 不合法');
+  }
+}
+
+app.get('/drive/search', authRequired, asyncRoute(async (req, res) => {
+  const query = typeof req.query.q === 'string' ? req.query.q.normalize('NFC').trim() : '';
+  if (!query) return res.json({ results: [], page: { limit: 50, nextCursor: null } });
+  if (query.length > 100) throw new HttpError(400, '搜索词过长');
+  const scope = req.query.scope === undefined ? 'all' : String(req.query.scope);
+  if (!['all', 'current'].includes(scope)) throw new HttpError(400, 'scope 不合法');
+  const folderId = parseOptionalId(req.query.folderId, 'folderId');
+  const limit = req.query.limit === undefined ? 50 : parseRequiredId(req.query.limit, 'limit');
+  if (limit > 100) throw new HttpError(400, 'limit 不能超过 100');
+  const cursor = decodeSearchCursor(req.query.cursor);
+
+  const results = await transaction(async (tx) => {
+    if (scope === 'current' && folderId !== null) await assertFolder(tx, folderId, req.user.id);
+    const conditions = ['ds.user_id = ?'];
+    const params = [req.user.id];
+    if (scope === 'current') {
+      conditions.push('ds.parent_id IS ?');
+      params.push(folderId);
+    }
+    if (query.length >= 3) {
+      conditions.push('drive_search MATCH ?');
+      params.push(`"${query.replace(/"/g, '""')}"`);
+    } else {
+      conditions.push("ds.name LIKE ? ESCAPE '\\'");
+      params.push(`%${query.replace(/[\\%_]/g, (char) => `\\${char}`)}%`);
+    }
+    if (cursor) {
+      conditions.push('(lower(ds.name) > ? OR (lower(ds.name) = ? AND (ds.entity_type > ? OR (ds.entity_type = ? AND ds.entity_id > ?))))');
+      params.push(cursor[0], cursor[0], cursor[1], cursor[1], cursor[2]);
+    }
+    params.push(limit + 1);
+    return tx.all(`
+      WITH RECURSIVE folder_paths(id, path) AS (
+        SELECT id, '/' || name FROM user_folders WHERE user_id = ? AND parent_id IS NULL
+        UNION ALL
+        SELECT f.id, fp.path || '/' || f.name
+        FROM user_folders f JOIN folder_paths fp ON f.parent_id = fp.id
+        WHERE f.user_id = ?
+      )
+      SELECT CAST(ds.entity_id AS INTEGER) AS id, ds.entity_type AS type, ds.name, lower(ds.name) AS name_key,
+             CAST(ds.parent_id AS INTEGER) AS folder_id, COALESCE(fp.path, '/') AS path,
+             f.md5, f.size, f.mime_type
+      FROM drive_search ds
+      LEFT JOIN user_files uf ON ds.entity_type = 'file' AND uf.id = ds.entity_id
+      LEFT JOIN files f ON uf.file_id = f.id
+      LEFT JOIN folder_paths fp ON fp.id = ds.parent_id
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY lower(ds.name), ds.entity_type, ds.entity_id
+      LIMIT ?
+    `, [req.user.id, req.user.id, ...params]);
+  });
+  const pageRows = results.slice(0, limit);
+  res.json({
+    results: pageRows.map(({ name_key, ...item }) => item),
+    page: { limit, nextCursor: results.length > limit ? encodeSearchCursor(pageRows.at(-1)) : null },
+  });
+}));
+
 app.post('/drive/folder', authRequired, asyncRoute(async (req, res) => {
   const body = getRequestBody(req);
   const name = normalizeFileName(body.name);
@@ -1508,6 +1584,27 @@ app.get('/files/:md5/download', authRequired, asyncRoute(async (req, res, next) 
     if (err && !res.headersSent) return next(err);
     return undefined;
   });
+}));
+
+app.get('/files/:md5/thumbnail', authRequired, asyncRoute(async (req, res) => {
+  const md5 = String(req.params.md5 || '').toLowerCase();
+  if (!isDigest(md5, 32)) throw new HttpError(400, 'md5 不合法');
+  const record = await get(`
+    SELECT f.id, f.stored_name, f.storage_key, f.md5, f.sha256, f.mime_type
+    FROM user_files uf JOIN files f ON uf.file_id = f.id
+    WHERE f.md5 = ? AND uf.user_id = ? LIMIT 1
+  `, [md5, req.user.id]);
+  if (!record) throw new HttpError(404, '文件不存在');
+  const thumbnailPath = await getOrCreateThumbnail(record);
+  if (!thumbnailPath) throw new HttpError(415, '该文件无法生成缩略图');
+  const etag = `"thumbnail-v1-${record.sha256 || record.storage_key || record.md5}"`;
+  res.set({
+    'Content-Type': 'image/webp',
+    'Cache-Control': 'private, max-age=31536000, immutable',
+    ETag: etag,
+  });
+  if (req.headers['if-none-match'] === etag) return res.status(304).end();
+  return res.sendFile(thumbnailPath);
 }));
 
 app.use((err, _req, res, next) => {
