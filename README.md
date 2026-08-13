@@ -68,12 +68,28 @@ npm start
 
 ## Docker
 
+本地构建 Docker 镜像并导出为 tar 包：
+
 ```bash
-cp .env.example .env
-# 编辑 .env
-docker compose up -d --build
+npm run build:docker
+```
+
+该命令会生成 `n-file-system.tar`，镜像标签为 `n-file-system:latest`。将 tar 包、`docker-compose.yml`、`.env`（由 `.env.example` 复制并填写）以及需要持久化的 `data/`、`uploads/` 目录传到服务端，例如：
+
+```bash
+scp n-file-system.tar docker-compose.yml .env user@server:/opt/n-file-system/
+```
+
+在服务端加载镜像并启动服务：
+
+```bash
+cd /opt/n-file-system
+docker load -i n-file-system.tar
+docker compose up -d
 docker compose ps
 ```
+
+服务端使用已经加载的 `n-file-system:latest` 镜像，不需要再次构建。更新版本时，在构建机重新执行 `npm run build:docker`，替换服务端 tar 包后再次执行 `docker load -i n-file-system.tar` 和 `docker compose up -d`。首次部署前请确认服务端 Docker Compose 可用，并确保服务端与构建机使用兼容的 CPU 架构。
 
 镜像通过入口脚本初始化 `/app/data` 和 `/app/uploads` 的权限，然后以 `node` 用户运行。两个目录必须同时持久化。
 
