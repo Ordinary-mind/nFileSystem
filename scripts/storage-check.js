@@ -95,7 +95,8 @@ async function collectLogicalIssues() {
   const unreferencedFiles = await all(`
     SELECT f.id, 'unreferenced_file_record' AS reason
     FROM files f
-    WHERE NOT EXISTS (SELECT 1 FROM user_files uf WHERE uf.file_id = f.id)
+    WHERE NOT EXISTS (SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NOT NULL)
   `);
   issues.push(...unreferencedFiles);
 

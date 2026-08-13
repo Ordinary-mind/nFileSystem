@@ -304,13 +304,13 @@ export function mountDrive(root, folderId, navigate, route = {}) {
   async function deleteItem(item) {
     const accepted = await confirmDialog({
       title: `删除${item.type === 'folder' ? '文件夹' : '文件'}`,
-      message: item.type === 'folder' ? '文件夹内的所有内容也会被删除，此操作无法撤销。' : '此文件将从当前账户中删除，此操作无法撤销。',
-      confirmLabel: '删除', danger: true,
+      message: item.type === 'folder' ? '文件夹内的所有内容将移入回收站，可在保留期内恢复。' : '此文件将移入回收站，可在保留期内恢复。',
+      confirmLabel: '移入回收站', danger: true,
     });
     if (!accepted) return;
     try {
       await request(`/drive/${item.type}/${item.id}`, { method: 'DELETE' });
-      showToast('删除成功');
+      showToast('已移入回收站');
       load();
     } catch (error) { showToast(error.message, 'error'); }
   }
@@ -321,8 +321,8 @@ export function mountDrive(root, folderId, navigate, route = {}) {
     const folderCount = items.filter((item) => item.type === 'folder').length;
     const accepted = await confirmDialog({
       title: `删除 ${items.length} 项`,
-      message: folderCount ? `包含 ${folderCount} 个文件夹，文件夹内的所有内容也会被删除，此操作无法撤销。` : '选中的文件将从当前账户中删除，此操作无法撤销。',
-      confirmLabel: '全部删除', danger: true,
+      message: folderCount ? `包含 ${folderCount} 个文件夹，内容将移入回收站。` : '选中的文件将移入回收站。',
+      confirmLabel: '移入回收站', danger: true,
     });
     if (!accepted) return;
     selectionDelete.disabled = true;

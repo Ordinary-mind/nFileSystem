@@ -35,7 +35,7 @@ export function parseRoute(hash = '') {
   const clean = String(hash || '').replace(/^#\/?/, '');
   const [pathname, query = ''] = clean.split('?');
   const parts = pathname.split('/').filter(Boolean);
-  const section = ['files', 'apps', 'me'].includes(parts[0]) ? parts[0] : 'files';
+  const section = ['files', 'trash', 'apps', 'me'].includes(parts[0]) ? parts[0] : 'files';
   const params = new URLSearchParams(query);
   return {
     section,

@@ -5,6 +5,7 @@ import { parseRoute } from './core/utils.js';
 import { confirmDialog, showToast } from './core/ui.js';
 import { mountAuth } from './views/auth.js';
 import { mountDrive } from './views/drive.js';
+import { mountTrash } from './views/trash.js';
 import { mountIntegrations } from './views/integrations.js';
 import { mountProfile } from './views/profile.js';
 
@@ -36,6 +37,7 @@ export function startApp() {
         <section id="view-root" class="screen-content"></section>
         <nav class="bottom-nav" aria-label="主导航">
           <button class="nav-button ${route.section === 'files' ? 'active' : ''}" data-nav="files">${icon('files')}<span>文件</span></button>
+          <button class="nav-button ${route.section === 'trash' ? 'active' : ''}" data-nav="trash">${icon('trash')}<span>回收站</span></button>
           <button class="nav-button ${route.section === 'apps' ? 'active' : ''}" data-nav="apps">${icon('apps')}<span>应用</span></button>
           <button class="nav-button ${route.section === 'me' ? 'active' : ''}" data-nav="me">${icon('user')}<span>我的</span></button>
         </nav>
@@ -47,6 +49,7 @@ export function startApp() {
 
     const root = app.querySelector('#view-root');
     if (route.section === 'files') mountDrive(root, route.id, navigate, route);
+    else if (route.section === 'trash') mountTrash(root, navigate);
     else if (route.section === 'apps') mountIntegrations(root, route.id, navigate);
     else mountProfile(root, getSession().userEmail, () => logout(true), (token, email) => {
       saveSession(token, email);

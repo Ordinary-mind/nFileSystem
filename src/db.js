@@ -106,7 +106,7 @@ async function createIntegrityTriggers() {
     WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id)
       OR (NEW.parent_id IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM user_folders
-        WHERE id = NEW.parent_id AND user_id = NEW.user_id
+        WHERE id = NEW.parent_id AND user_id = NEW.user_id AND deleted_at IS NULL
       ))
     BEGIN
       SELECT RAISE(ABORT, 'invalid folder parent');
@@ -117,7 +117,7 @@ async function createIntegrityTriggers() {
     WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id)
       OR (NEW.parent_id IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM user_folders
-        WHERE id = NEW.parent_id AND user_id = NEW.user_id
+        WHERE id = NEW.parent_id AND user_id = NEW.user_id AND deleted_at IS NULL
       ))
     BEGIN
       SELECT RAISE(ABORT, 'invalid folder parent');
@@ -144,7 +144,7 @@ async function createIntegrityTriggers() {
     BEFORE INSERT ON user_folders
     WHEN EXISTS (
       SELECT 1 FROM user_folders
-      WHERE user_id = NEW.user_id AND parent_id IS NEW.parent_id AND name = NEW.name
+      WHERE user_id = NEW.user_id AND parent_id IS NEW.parent_id AND name = NEW.name AND deleted_at IS NULL
     )
     BEGIN
       SELECT RAISE(ABORT, 'duplicate folder name');
@@ -155,7 +155,7 @@ async function createIntegrityTriggers() {
     WHEN EXISTS (
       SELECT 1 FROM user_folders
       WHERE user_id = NEW.user_id AND parent_id IS NEW.parent_id
-        AND name = NEW.name AND id != OLD.id
+        AND name = NEW.name AND id != OLD.id AND deleted_at IS NULL
     )
     BEGIN
       SELECT RAISE(ABORT, 'duplicate folder name');
@@ -167,7 +167,7 @@ async function createIntegrityTriggers() {
       OR NOT EXISTS (SELECT 1 FROM files WHERE id = NEW.file_id)
       OR (NEW.folder_id IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM user_folders
-        WHERE id = NEW.folder_id AND user_id = NEW.user_id
+        WHERE id = NEW.folder_id AND user_id = NEW.user_id AND deleted_at IS NULL
       ))
     BEGIN
       SELECT RAISE(ABORT, 'invalid user file reference');
@@ -179,7 +179,7 @@ async function createIntegrityTriggers() {
       OR NOT EXISTS (SELECT 1 FROM files WHERE id = NEW.file_id)
       OR (NEW.folder_id IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM user_folders
-        WHERE id = NEW.folder_id AND user_id = NEW.user_id
+        WHERE id = NEW.folder_id AND user_id = NEW.user_id AND deleted_at IS NULL
       ))
     BEGIN
       SELECT RAISE(ABORT, 'invalid user file reference');
@@ -190,7 +190,7 @@ async function createIntegrityTriggers() {
     WHEN EXISTS (
       SELECT 1 FROM user_files
       WHERE user_id = NEW.user_id AND folder_id IS NEW.folder_id
-        AND file_id = NEW.file_id AND name = NEW.name
+        AND file_id = NEW.file_id AND name = NEW.name AND deleted_at IS NULL
     )
     BEGIN
       SELECT RAISE(ABORT, 'duplicate user file');
@@ -201,7 +201,7 @@ async function createIntegrityTriggers() {
     WHEN EXISTS (
       SELECT 1 FROM user_files
       WHERE user_id = NEW.user_id AND folder_id IS NEW.folder_id
-        AND file_id = NEW.file_id AND name = NEW.name AND id != OLD.id
+        AND file_id = NEW.file_id AND name = NEW.name AND id != OLD.id AND deleted_at IS NULL
     )
     BEGIN
       SELECT RAISE(ABORT, 'duplicate user file');
@@ -233,26 +233,26 @@ async function createSearchIndex() {
     DROP TRIGGER IF EXISTS trg_search_file_update;
     DROP TRIGGER IF EXISTS trg_search_file_delete;
 
-    CREATE TRIGGER trg_search_folder_insert AFTER INSERT ON user_folders BEGIN
+    CREATE TRIGGER trg_search_folder_insert AFTER INSERT ON user_folders WHEN NEW.deleted_at IS NULL BEGIN
       INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
       VALUES (NEW.name, 'folder', NEW.id, NEW.user_id, NEW.parent_id);
     END;
-    CREATE TRIGGER trg_search_folder_update AFTER UPDATE OF name, user_id, parent_id ON user_folders BEGIN
+    CREATE TRIGGER trg_search_folder_update AFTER UPDATE OF name, user_id, parent_id, deleted_at ON user_folders BEGIN
       DELETE FROM drive_search WHERE entity_type = 'folder' AND entity_id = OLD.id;
       INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
-      VALUES (NEW.name, 'folder', NEW.id, NEW.user_id, NEW.parent_id);
+      SELECT NEW.name, 'folder', NEW.id, NEW.user_id, NEW.parent_id WHERE NEW.deleted_at IS NULL;
     END;
     CREATE TRIGGER trg_search_folder_delete AFTER DELETE ON user_folders BEGIN
       DELETE FROM drive_search WHERE entity_type = 'folder' AND entity_id = OLD.id;
     END;
-    CREATE TRIGGER trg_search_file_insert AFTER INSERT ON user_files BEGIN
+    CREATE TRIGGER trg_search_file_insert AFTER INSERT ON user_files WHEN NEW.deleted_at IS NULL BEGIN
       INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
       VALUES (NEW.name, 'file', NEW.id, NEW.user_id, NEW.folder_id);
     END;
-    CREATE TRIGGER trg_search_file_update AFTER UPDATE OF name, user_id, folder_id ON user_files BEGIN
+    CREATE TRIGGER trg_search_file_update AFTER UPDATE OF name, user_id, folder_id, deleted_at ON user_files BEGIN
       DELETE FROM drive_search WHERE entity_type = 'file' AND entity_id = OLD.id;
       INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
-      VALUES (NEW.name, 'file', NEW.id, NEW.user_id, NEW.folder_id);
+      SELECT NEW.name, 'file', NEW.id, NEW.user_id, NEW.folder_id WHERE NEW.deleted_at IS NULL;
     END;
     CREATE TRIGGER trg_search_file_delete AFTER DELETE ON user_files BEGIN
       DELETE FROM drive_search WHERE entity_type = 'file' AND entity_id = OLD.id;
@@ -267,9 +267,9 @@ async function createSearchIndex() {
     await rawRun('DELETE FROM drive_search');
     await rawExec(`
       INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
-      SELECT name, 'folder', id, user_id, parent_id FROM user_folders;
+      SELECT name, 'folder', id, user_id, parent_id FROM user_folders WHERE deleted_at IS NULL;
       INSERT INTO drive_search(name, entity_type, entity_id, user_id, parent_id)
-      SELECT name, 'file', id, user_id, folder_id FROM user_files;
+      SELECT name, 'file', id, user_id, folder_id FROM user_files WHERE deleted_at IS NULL;
     `);
   }
 }
@@ -281,12 +281,12 @@ async function assertBaselineDatabase() {
     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
   `);
   if (version.user_version === 0 && tables.count === 0) return;
-  if (version.user_version !== 1) {
+  if (![1, 2].includes(version.user_version)) {
     throw new Error('数据库不是当前基线版本，请清空 DATA_DIR 后重新启动');
   }
   const fileColumns = await rawAll('PRAGMA table_info(files)');
   const expected = ['id', 'sha256', 'size', 'mime_type', 'created_at'];
-  if (fileColumns.map((column) => column.name).join(',') !== expected.join(',')) {
+  if (fileColumns.slice(0, 5).map((column) => column.name).join(',') !== expected.join(',')) {
     throw new Error('数据库不是当前基线版本，请清空 DATA_DIR 后重新启动');
   }
 }
@@ -300,6 +300,24 @@ async function initDb() {
 
     await rawRun('BEGIN IMMEDIATE');
     try {
+      if ((await rawGet('PRAGMA user_version')).user_version === 1) {
+        await rawExec(`
+          ALTER TABLE files ADD COLUMN unreferenced_at TEXT;
+          ALTER TABLE user_folders ADD COLUMN deleted_at TEXT;
+          ALTER TABLE user_folders ADD COLUMN trash_batch_id INTEGER;
+          ALTER TABLE user_files ADD COLUMN deleted_at TEXT;
+          ALTER TABLE user_files ADD COLUMN trash_batch_id INTEGER;
+          CREATE TABLE IF NOT EXISTS trash_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            item_type TEXT NOT NULL CHECK (item_type IN ('file', 'folder')),
+            item_id INTEGER NOT NULL,
+            deleted_at TEXT NOT NULL,
+            UNIQUE(user_id, item_type, item_id, deleted_at)
+          );
+        `);
+      }
+
       await rawExec(`
         CREATE TABLE IF NOT EXISTS users (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -340,7 +358,8 @@ async function initDb() {
           sha256 TEXT NOT NULL UNIQUE CHECK(length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
           size INTEGER NOT NULL CHECK (size >= 0),
           mime_type TEXT,
-          created_at TEXT DEFAULT (datetime('now'))
+          created_at TEXT DEFAULT (datetime('now')),
+          unreferenced_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS user_folders (
@@ -348,7 +367,9 @@ async function initDb() {
           user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           parent_id INTEGER REFERENCES user_folders(id) ON DELETE CASCADE,
           name TEXT NOT NULL,
-          created_at TEXT DEFAULT (datetime('now'))
+          created_at TEXT DEFAULT (datetime('now')),
+          deleted_at TEXT,
+          trash_batch_id INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS user_files (
@@ -357,7 +378,18 @@ async function initDb() {
           folder_id INTEGER REFERENCES user_folders(id) ON DELETE CASCADE,
           file_id INTEGER NOT NULL REFERENCES files(id),
           name TEXT NOT NULL,
-          created_at TEXT DEFAULT (datetime('now'))
+          created_at TEXT DEFAULT (datetime('now')),
+          deleted_at TEXT,
+          trash_batch_id INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS trash_batches (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          item_type TEXT NOT NULL CHECK (item_type IN ('file', 'folder')),
+          item_id INTEGER NOT NULL,
+          deleted_at TEXT NOT NULL,
+          UNIQUE(user_id, item_type, item_id, deleted_at)
         );
 
         CREATE TABLE IF NOT EXISTS logs (
@@ -416,6 +448,11 @@ async function initDb() {
         CREATE INDEX IF NOT EXISTS idx_user_files_list ON user_files(user_id, folder_id, id DESC);
         CREATE INDEX IF NOT EXISTS idx_user_files_duplicate ON user_files(user_id, folder_id, file_id, name);
         CREATE INDEX IF NOT EXISTS idx_user_files_file ON user_files(file_id);
+        CREATE INDEX IF NOT EXISTS idx_user_files_active ON user_files(user_id, folder_id, deleted_at);
+        CREATE INDEX IF NOT EXISTS idx_user_files_trash ON user_files(trash_batch_id, deleted_at);
+        CREATE INDEX IF NOT EXISTS idx_user_folders_trash ON user_folders(trash_batch_id, deleted_at);
+        CREATE INDEX IF NOT EXISTS idx_files_unreferenced ON files(unreferenced_at);
+        CREATE INDEX IF NOT EXISTS idx_trash_batches_user ON trash_batches(user_id, deleted_at);
         CREATE INDEX IF NOT EXISTS idx_logs_user ON logs(user_id);
         CREATE INDEX IF NOT EXISTS idx_logs_action ON logs(action);
         CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at);
@@ -431,7 +468,7 @@ async function initDb() {
       `);
       await createIntegrityTriggers();
       await createSearchIndex();
-      await rawRun('PRAGMA user_version = 1');
+      await rawRun('PRAGMA user_version = 2');
       await rawRun('COMMIT');
     } catch (err) {
       await rawRun('ROLLBACK');

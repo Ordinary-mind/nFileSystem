@@ -109,9 +109,9 @@ after(async () => {
 
 test('数据库使用 SHA-256 基线结构', async () => {
   const version = await dbModule.get('PRAGMA user_version');
-  assert.equal(version.user_version, 1);
+  assert.equal(version.user_version, 2);
   const columns = await dbModule.all('PRAGMA table_info(files)');
-  assert.deepEqual(columns.map((column) => column.name), ['id', 'sha256', 'size', 'mime_type', 'created_at']);
+  assert.deepEqual(columns.map((column) => column.name), ['id', 'sha256', 'size', 'mime_type', 'created_at', 'unreferenced_at']);
   await assert.rejects(
     dbModule.run('INSERT INTO files(sha256, size) VALUES (?, ?)', [`${'a'.repeat(63)}z`, 1]),
     /CHECK constraint failed/
@@ -452,7 +452,7 @@ test('相同内容不同扩展名只产生一个 SHA-256 物理文件', async ()
   const rows = await dbModule.all('SELECT * FROM files WHERE sha256 = ?', [sha256]);
   assert.equal(rows.length, 1);
   assert.match(rows[0].sha256, /^[a-f0-9]{64}$/);
-  assert.equal(Object.keys(rows[0]).sort().join(','), 'created_at,id,mime_type,sha256,size');
+  assert.equal(Object.keys(rows[0]).sort().join(','), 'created_at,id,mime_type,sha256,size,unreferenced_at');
   assert.equal(await storageModule.verifyFileRecord(rows[0], true).then((result) => result.ok), true);
 });
 
@@ -509,7 +509,7 @@ test('并发反向移动不能形成文件夹环', async () => {
   assert.equal(rows.filter((row) => row.parent_id !== null).length, 1);
 });
 
-test('删除最后一个引用会回收数据库记录和物理文件', async () => {
+test('删除最后一个引用会移入回收站并保留物理文件', async () => {
   const folderId = await createFolder(aliceToken, 'delete-with-content');
   const content = Buffer.from(`delete-me-${crypto.randomUUID()}`);
   const sha256 = crypto.createHash('sha256').update(content).digest('hex');
@@ -521,8 +521,32 @@ test('删除最后一个引用会回收数据库记录和物理文件', async ()
 
   const deleted = await api(`/drive/folder/${folderId}`, { method: 'DELETE', token: aliceToken });
   assert.equal(deleted.response.status, 200);
-  assert.equal(await dbModule.get('SELECT id FROM files WHERE id = ?', [record.id]), undefined);
-  assert.equal(fs.existsSync(filePath), false);
+  assert.notEqual(await dbModule.get('SELECT id FROM files WHERE id = ?', [record.id]), undefined);
+  assert.equal(fs.existsSync(filePath), true);
+  const trash = await api('/drive/trash', { token: aliceToken });
+  assert.equal(trash.response.status, 200);
+  assert.equal(trash.data.items.some((item) => item.item_type === 'folder' && item.name === 'delete-with-content'), true);
+});
+
+test('回收站恢复与永久删除遵循用户引用隔离', async () => {
+  const content = Buffer.from(`trash-shared-${crypto.randomUUID()}`);
+  const uploaded = await upload(aliceToken, 'trash-shared.bin', content);
+  assert.equal(uploaded.response.status, 200);
+  const aliceFileId = uploaded.data.files[0].id;
+  const record = await dbModule.get('SELECT * FROM files WHERE sha256 = ?', [crypto.createHash('sha256').update(content).digest('hex')]);
+  const bob = await dbModule.get('SELECT id FROM users WHERE name = ?', ['bob@example.com']);
+  await dbModule.run('INSERT INTO user_files(user_id, folder_id, file_id, name) VALUES (?, NULL, ?, ?)', [bob.id, record.id, 'trash-shared.bin']);
+  const deleted = await api(`/drive/file/${aliceFileId}`, { method: 'DELETE', token: aliceToken });
+  assert.equal(deleted.response.status, 200);
+  const bobView = await api('/drive', { token: bobToken });
+  assert.equal(bobView.data.files.some((file) => file.sha256 === record.sha256), true);
+  const trash = await api('/drive/trash', { token: aliceToken });
+  const item = trash.data.items.find((entry) => entry.item_type === 'file' && entry.name === 'trash-shared.bin');
+  assert.ok(item);
+  const restored = await api(`/drive/trash/${item.batch_id}/restore`, { method: 'POST', token: aliceToken });
+  assert.equal(restored.response.status, 200);
+  const restoredView = await api('/drive', { token: aliceToken });
+  assert.equal(restoredView.data.files.some((file) => file.id === aliceFileId), true);
 });
 
 test('目录列表支持稳定分页', async () => {

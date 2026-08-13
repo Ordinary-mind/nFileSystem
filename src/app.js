@@ -52,6 +52,8 @@ const MIN_FREE_BYTES = parseIntegerEnv('MIN_FREE_BYTES', 256 * 1024 * 1024, 0, N
 const DRIVE_PAGE_SIZE = parseIntegerEnv('DRIVE_PAGE_SIZE', 200, 20, 500);
 const MAX_FOLDER_DEPTH = parseIntegerEnv('MAX_FOLDER_DEPTH', 128, 8, 512);
 const STALE_TEMP_MAX_AGE_MS = parseIntegerEnv('STALE_TEMP_MAX_AGE_MS', 24 * 60 * 60 * 1000, 60 * 1000, 30 * 24 * 60 * 60 * 1000);
+const TRASH_RETENTION_DAYS = parseIntegerEnv('TRASH_RETENTION_DAYS', 7, 1, 3650);
+const TRASH_RETENTION_MS = TRASH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
 let activeUploads = 0;
 let serverInstance = null;
@@ -405,7 +407,7 @@ async function getUserUsage(tx, userId) {
     SELECT COALESCE(SUM(f.size), 0) AS total
     FROM user_files uf
     JOIN files f ON f.id = uf.file_id
-    WHERE uf.user_id = ?
+    WHERE uf.user_id = ? AND uf.deleted_at IS NULL
   `, [userId]);
   return Number(row.total || 0);
 }
@@ -460,7 +462,7 @@ async function persistUploadBatch(userId, folderId, preparedFiles) {
 
           const duplicate = await tx.get(`
             SELECT id FROM user_files
-            WHERE user_id = ? AND folder_id IS ? AND file_id = ? AND name = ?
+            WHERE user_id = ? AND folder_id IS ? AND file_id = ? AND name = ? AND deleted_at IS NULL
           `, [userId, folderId, fileRecord.id, prepared.originalName]);
           if (duplicate) {
             saved.push({
@@ -523,8 +525,14 @@ async function deleteUnreferencedRecords(tx, candidates) {
     seen.add(record.id);
     const result = await tx.run(`
       DELETE FROM files
-      WHERE id = ? AND NOT EXISTS (SELECT 1 FROM user_files WHERE file_id = files.id)
-    `, [record.id]);
+      WHERE id = ?
+        AND NOT EXISTS (SELECT 1 FROM user_files WHERE file_id = files.id AND deleted_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM user_files
+          WHERE file_id = files.id AND deleted_at IS NOT NULL
+            AND datetime(deleted_at, ?) > datetime('now')
+        )
+    `, [record.id, `+${TRASH_RETENTION_DAYS} days`]);
     if (result.changes) removed.push(record);
   }
   return removed;
@@ -533,16 +541,61 @@ async function deleteUnreferencedRecords(tx, candidates) {
 async function garbageCollectUnreferencedFiles() {
   return withStorageLock(async () => {
     const removed = await transaction(async (tx) => {
+      await tx.run(`DELETE FROM user_files WHERE deleted_at IS NOT NULL AND datetime(deleted_at, ?) <= datetime('now')`, [`+${TRASH_RETENTION_DAYS} days`]);
+      await tx.run(`DELETE FROM user_folders WHERE deleted_at IS NOT NULL AND datetime(deleted_at, ?) <= datetime('now')`, [`+${TRASH_RETENTION_DAYS} days`]);
       const records = await tx.all(`
-        SELECT id, sha256, size
-        FROM files f
-        WHERE NOT EXISTS (SELECT 1 FROM user_files uf WHERE uf.file_id = f.id)
-      `);
+        SELECT id, sha256, size FROM files f
+        WHERE NOT EXISTS (SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NOT NULL AND datetime(uf.deleted_at, ?) > datetime('now'))
+      `, [`+${TRASH_RETENTION_DAYS} days`]);
       return deleteUnreferencedRecords(tx, records);
     });
     await removePhysicalFiles(removed);
     return removed.length;
   });
+}
+
+async function markTrashBatch(tx, userId, type, id) {
+  const deletedAt = new Date().toISOString();
+  const batch = await tx.run(
+    'INSERT INTO trash_batches(user_id, item_type, item_id, deleted_at) VALUES (?, ?, ?, ?)',
+    [userId, type, id, deletedAt]
+  );
+  if (type === 'file') {
+    await tx.run('UPDATE user_files SET deleted_at = ?, trash_batch_id = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL', [deletedAt, batch.lastID, id, userId]);
+  } else {
+    await tx.run(`
+      WITH RECURSIVE tree(id) AS (
+        SELECT id FROM user_folders WHERE id = ? AND user_id = ? AND deleted_at IS NULL
+        UNION ALL SELECT f.id FROM user_folders f JOIN tree t ON f.parent_id = t.id
+        WHERE f.user_id = ? AND f.deleted_at IS NULL
+      )
+      UPDATE user_folders SET deleted_at = ?, trash_batch_id = ? WHERE user_id = ? AND id IN (SELECT id FROM tree)
+    `, [id, userId, userId, deletedAt, batch.lastID, userId]);
+    await tx.run(`
+      WITH RECURSIVE tree(id) AS (
+        SELECT id FROM user_folders WHERE id = ? AND user_id = ?
+        UNION ALL SELECT f.id FROM user_folders f JOIN tree t ON f.parent_id = t.id WHERE f.user_id = ?
+      )
+      UPDATE user_files SET deleted_at = ?, trash_batch_id = ? WHERE user_id = ? AND folder_id IN (SELECT id FROM tree) AND deleted_at IS NULL
+    `, [id, userId, userId, deletedAt, batch.lastID, userId]);
+  }
+  await tx.run('DELETE FROM access_links WHERE user_id = ? AND user_file_id IN (SELECT id FROM user_files WHERE trash_batch_id = ?)', [userId, batch.lastID]);
+  return batch.lastID;
+}
+
+async function listTrash(userId) {
+  return all(`
+    SELECT b.id AS batch_id, b.item_type, b.item_id, b.deleted_at,
+      CASE WHEN b.item_type = 'file' THEN uf.name ELSE fo.name END AS name,
+      CASE WHEN b.item_type = 'file' THEN f.size ELSE NULL END AS size,
+      CASE WHEN b.item_type = 'file' THEN f.sha256 ELSE NULL END AS sha256
+    FROM trash_batches b
+    LEFT JOIN user_files uf ON b.item_type = 'file' AND uf.id = b.item_id
+    LEFT JOIN files f ON uf.file_id = f.id
+    LEFT JOIN user_folders fo ON b.item_type = 'folder' AND fo.id = b.item_id
+    WHERE b.user_id = ? ORDER BY b.id DESC
+  `, [userId]);
 }
 
 
@@ -1031,31 +1084,20 @@ app.post('/api/v1/files/:id/access-links', apiTokenRequired(['links:create']), a
 
 app.delete('/api/v1/files/:id', apiTokenRequired(['files:delete']), asyncRoute(async (req, res) => {
   const id = parseRequiredId(req.params.id, 'id');
-  const removedFiles = await withStorageLock(async () => {
-    const records = await transaction(async (tx) => {
-      const file = await tx.get(
-        `SELECT uf.id, uf.folder_id, f.id AS file_id, f.sha256, f.size
-         FROM user_files uf
-         JOIN files f ON f.id = uf.file_id
-         WHERE uf.id = ? AND uf.user_id = ?`,
-        [id, req.apiAuth.userId]
-      );
+  const batchId = await transaction(async (tx) => {
+      const file = await tx.get('SELECT id, folder_id FROM user_files WHERE id = ? AND user_id = ? AND deleted_at IS NULL', [id, req.apiAuth.userId]);
       const query = (sql, params) => tx.get(sql, params);
       if (!file || !(await isFolderInsideRoot(file.folder_id, req.apiAuth.rootFolderId, req.apiAuth.userId, query))) {
         throw new HttpError(404, '文件不存在或不在应用根目录内');
       }
-      await tx.run('DELETE FROM user_files WHERE id = ? AND user_id = ?', [id, req.apiAuth.userId]);
-      return deleteUnreferencedRecords(tx, [{ ...file, id: file.file_id }]);
-    });
-    await removePhysicalFiles(records);
-    return records;
+      return markTrashBatch(tx, req.apiAuth.userId, 'file', id);
   });
   addLog({
     userId: req.apiAuth.userId,
     action: 'integration_file_delete',
     targetType: 'file',
     targetId: id,
-    detail: JSON.stringify({ integrationId: req.apiAuth.integrationId, physicalFileRemoved: removedFiles.length > 0 }),
+    detail: JSON.stringify({ integrationId: req.apiAuth.integrationId, trashBatchId: batchId }),
   }, req);
   res.json({ message: '删除成功' });
 }));
@@ -1164,7 +1206,7 @@ app.post('/files/instant', authRequired, asyncRoute(async (req, res) => {
         SELECT DISTINCT f.id, f.sha256, f.size
         FROM files f
         JOIN user_files owned ON owned.file_id = f.id
-        WHERE f.sha256 = ? AND owned.user_id = ?
+        WHERE f.sha256 = ? AND owned.user_id = ? AND owned.deleted_at IS NULL
       `, [sha256, req.user.id]);
       if (!fileRecord) {
         output.push({ sha256, originalName, success: false, message: '当前账号没有该文件，请走正常上传' });
@@ -1178,7 +1220,7 @@ app.post('/files/instant', authRequired, asyncRoute(async (req, res) => {
       }
       const duplicate = await tx.get(`
         SELECT id FROM user_files
-        WHERE user_id = ? AND folder_id IS ? AND file_id = ? AND name = ?
+        WHERE user_id = ? AND folder_id IS ? AND file_id = ? AND name = ? AND deleted_at IS NULL
       `, [req.user.id, folderId, fileRecord.id, originalName]);
       if (duplicate) {
         output.push({ sha256, originalName, success: true, id: duplicate.id, size: fileRecord.size, duplicate: true });
@@ -1238,7 +1280,7 @@ app.get('/drive', authRequired, asyncRoute(async (req, res) => {
     const folders = await tx.all(`
       SELECT id, name, created_at
       FROM user_folders
-      WHERE user_id = ? AND parent_id IS ?${searchFolderSql}
+      WHERE user_id = ? AND parent_id IS ? AND deleted_at IS NULL${searchFolderSql}
       ORDER BY name
       LIMIT ? OFFSET ?
     `, folderParams);
@@ -1246,7 +1288,7 @@ app.get('/drive', authRequired, asyncRoute(async (req, res) => {
       SELECT uf.id, uf.name, uf.created_at, f.sha256, f.size, f.mime_type
       FROM user_files uf
       JOIN files f ON uf.file_id = f.id
-      WHERE uf.user_id = ? AND uf.folder_id IS ?${searchFileSql}
+      WHERE uf.user_id = ? AND uf.folder_id IS ? AND uf.deleted_at IS NULL${searchFileSql}
       ORDER BY uf.id DESC
       LIMIT ? OFFSET ?
     `, fileParams);
@@ -1351,6 +1393,97 @@ app.get('/drive/search', authRequired, asyncRoute(async (req, res) => {
   });
 }));
 
+app.get('/drive/trash', authRequired, asyncRoute(async (req, res) => {
+  const items = await listTrash(req.user.id);
+  res.json({ items, retentionDays: TRASH_RETENTION_DAYS });
+}));
+
+app.get('/api/v1/trash', apiTokenRequired(['files:read']), asyncRoute(async (req, res) => {
+  const items = await listTrash(req.apiAuth.userId);
+  res.json({ items, retentionDays: TRASH_RETENTION_DAYS });
+}));
+
+app.post('/api/v1/trash/:batchId/restore', apiTokenRequired(['files:upload']), asyncRoute(async (req, res) => {
+  const batchId = parseRequiredId(req.params.batchId, 'batchId');
+  const restored = await transaction(async (tx) => {
+    const batch = await tx.get('SELECT * FROM trash_batches WHERE id = ? AND user_id = ? AND item_type = ?', [batchId, req.apiAuth.userId, 'file']);
+    if (!batch || Date.now() - new Date(batch.deleted_at).getTime() >= TRASH_RETENTION_MS) throw new HttpError(404, '回收站项目不存在或已过期');
+    const file = await tx.get('SELECT id, folder_id FROM user_files WHERE id = ? AND trash_batch_id = ?', [batch.item_id, batchId]);
+    const query = (sql, params) => tx.get(sql, params);
+    if (!file || !(await isFolderInsideRoot(file.folder_id, req.apiAuth.rootFolderId, req.apiAuth.userId, query))) throw new HttpError(403, '回收站项目不在应用根目录内');
+    await tx.run('UPDATE user_files SET deleted_at = NULL, trash_batch_id = NULL WHERE id = ?', [file.id]);
+    await tx.run('DELETE FROM trash_batches WHERE id = ?', [batchId]);
+    return file.id;
+  });
+  res.json({ message: '恢复成功', id: restored });
+}));
+
+app.delete('/api/v1/trash/:batchId', apiTokenRequired(['files:delete']), asyncRoute(async (req, res) => {
+  const batchId = parseRequiredId(req.params.batchId, 'batchId');
+  await transaction(async (tx) => {
+    const batch = await tx.get('SELECT id FROM trash_batches WHERE id = ? AND user_id = ?', [batchId, req.apiAuth.userId]);
+    if (!batch) throw new HttpError(404, '回收站项目不存在');
+    await tx.run('DELETE FROM user_files WHERE trash_batch_id = ?', [batchId]);
+    await tx.run('DELETE FROM user_folders WHERE trash_batch_id = ?', [batchId]);
+    await tx.run('DELETE FROM trash_batches WHERE id = ?', [batchId]);
+  });
+  await garbageCollectUnreferencedFiles();
+  res.json({ message: '已永久删除' });
+}));
+
+app.delete('/api/v1/trash', apiTokenRequired(['files:delete']), asyncRoute(async (req, res) => {
+  await transaction(async (tx) => {
+    await tx.run('DELETE FROM user_files WHERE user_id = ? AND deleted_at IS NOT NULL', [req.apiAuth.userId]);
+    await tx.run('DELETE FROM user_folders WHERE user_id = ? AND deleted_at IS NOT NULL', [req.apiAuth.userId]);
+    await tx.run('DELETE FROM trash_batches WHERE user_id = ?', [req.apiAuth.userId]);
+  });
+  await garbageCollectUnreferencedFiles();
+  res.json({ message: '回收站已清空' });
+}));
+
+app.post('/drive/trash/:batchId/restore', authRequired, asyncRoute(async (req, res) => {
+  const batchId = parseRequiredId(req.params.batchId, 'batchId');
+  const result = await transaction(async (tx) => {
+    const batch = await tx.get('SELECT * FROM trash_batches WHERE id = ? AND user_id = ?', [batchId, req.user.id]);
+    if (!batch) throw new HttpError(404, '回收站项目不存在');
+    if (Date.now() - new Date(batch.deleted_at).getTime() >= TRASH_RETENTION_MS) throw new HttpError(410, '回收站项目已过期');
+    if (batch.item_type === 'file') {
+      const file = await tx.get('SELECT id, folder_id, name FROM user_files WHERE id = ? AND trash_batch_id = ?', [batch.item_id, batchId]);
+      if (!file) throw new HttpError(410, '文件内容已清理');
+      await tx.run('UPDATE user_files SET deleted_at = NULL, trash_batch_id = NULL WHERE id = ?', [file.id]);
+    } else {
+      await tx.run('UPDATE user_folders SET deleted_at = NULL, trash_batch_id = NULL WHERE trash_batch_id = ?', [batchId]);
+      await tx.run('UPDATE user_files SET deleted_at = NULL, trash_batch_id = NULL WHERE trash_batch_id = ?', [batchId]);
+    }
+    await tx.run('DELETE FROM trash_batches WHERE id = ?', [batchId]);
+    return batch;
+  });
+  res.json({ message: '恢复成功', itemType: result.item_type });
+}));
+
+app.delete('/drive/trash/:batchId', authRequired, asyncRoute(async (req, res) => {
+  const batchId = parseRequiredId(req.params.batchId, 'batchId');
+  await transaction(async (tx) => {
+    const batch = await tx.get('SELECT id FROM trash_batches WHERE id = ? AND user_id = ?', [batchId, req.user.id]);
+    if (!batch) throw new HttpError(404, '回收站项目不存在');
+    await tx.run('DELETE FROM user_files WHERE trash_batch_id = ?', [batchId]);
+    await tx.run('DELETE FROM user_folders WHERE trash_batch_id = ?', [batchId]);
+    await tx.run('DELETE FROM trash_batches WHERE id = ?', [batchId]);
+  });
+  await garbageCollectUnreferencedFiles();
+  res.json({ message: '已永久删除' });
+}));
+
+app.delete('/drive/trash', authRequired, asyncRoute(async (req, res) => {
+  await transaction(async (tx) => {
+    await tx.run('DELETE FROM user_files WHERE user_id = ? AND deleted_at IS NOT NULL', [req.user.id]);
+    await tx.run('DELETE FROM user_folders WHERE user_id = ? AND deleted_at IS NOT NULL', [req.user.id]);
+    await tx.run('DELETE FROM trash_batches WHERE user_id = ?', [req.user.id]);
+  });
+  await garbageCollectUnreferencedFiles();
+  res.json({ message: '回收站已清空' });
+}));
+
 app.post('/drive/folder', authRequired, asyncRoute(async (req, res) => {
   const body = getRequestBody(req);
   const name = normalizeFileName(body.name);
@@ -1393,39 +1526,17 @@ app.put('/drive/folder/:id', authRequired, asyncRoute(async (req, res) => {
 
 app.delete('/drive/folder/:id', authRequired, asyncRoute(async (req, res) => {
   const id = parseRequiredId(req.params.id, 'id');
-  const removedFiles = await withStorageLock(async () => {
-    const records = await transaction(async (tx) => {
-      const folder = await tx.get('SELECT id FROM user_folders WHERE id = ? AND user_id = ?', [id, req.user.id]);
-      if (!folder) throw new HttpError(404, '文件夹不存在');
-      const tree = `
-        WITH RECURSIVE tree(id) AS (
-          SELECT id FROM user_folders WHERE id = ? AND user_id = ?
-          UNION
-          SELECT f.id FROM user_folders f JOIN tree t ON f.parent_id = t.id
-          WHERE f.user_id = ?
-        )`;
-      const candidates = await tx.all(`${tree}
-        SELECT DISTINCT f.id, f.sha256, f.size
-        FROM files f JOIN user_files uf ON uf.file_id = f.id
-        WHERE uf.user_id = ? AND uf.folder_id IN (SELECT id FROM tree)
-      `, [id, req.user.id, req.user.id, req.user.id]);
-      await tx.run(`${tree}
-        DELETE FROM user_files WHERE user_id = ? AND folder_id IN (SELECT id FROM tree)
-      `, [id, req.user.id, req.user.id, req.user.id]);
-      await tx.run(`${tree}
-        DELETE FROM user_folders WHERE user_id = ? AND id IN (SELECT id FROM tree)
-      `, [id, req.user.id, req.user.id, req.user.id]);
-      return deleteUnreferencedRecords(tx, candidates);
-    });
-    await removePhysicalFiles(records);
-    return records;
+  const batchId = await transaction(async (tx) => {
+    const folder = await tx.get('SELECT id FROM user_folders WHERE id = ? AND user_id = ? AND deleted_at IS NULL', [id, req.user.id]);
+    if (!folder) throw new HttpError(404, '文件夹不存在');
+    return markTrashBatch(tx, req.user.id, 'folder', id);
   });
   addLog({
     userId: req.user.id,
     action: 'folder_delete',
     targetType: 'folder',
     targetId: id,
-    detail: JSON.stringify({ physicalFilesRemoved: removedFiles.length }),
+    detail: JSON.stringify({ trashBatchId: batchId }),
   }, req);
   res.json({ message: '删除成功' });
 }));
@@ -1453,26 +1564,17 @@ app.put('/drive/file/:id', authRequired, asyncRoute(async (req, res) => {
 
 app.delete('/drive/file/:id', authRequired, asyncRoute(async (req, res) => {
   const id = parseRequiredId(req.params.id, 'id');
-  const removedFiles = await withStorageLock(async () => {
-    const records = await transaction(async (tx) => {
-      const file = await tx.get(`
-        SELECT uf.id, f.id AS file_id, f.sha256, f.size
-        FROM user_files uf JOIN files f ON f.id = uf.file_id
-        WHERE uf.id = ? AND uf.user_id = ?
-      `, [id, req.user.id]);
-      if (!file) throw new HttpError(404, '文件不存在');
-      await tx.run('DELETE FROM user_files WHERE id = ? AND user_id = ?', [id, req.user.id]);
-      return deleteUnreferencedRecords(tx, [{ ...file, id: file.file_id }]);
-    });
-    await removePhysicalFiles(records);
-    return records;
+  const batchId = await transaction(async (tx) => {
+    const file = await tx.get('SELECT id FROM user_files WHERE id = ? AND user_id = ? AND deleted_at IS NULL', [id, req.user.id]);
+    if (!file) throw new HttpError(404, '文件不存在');
+    return markTrashBatch(tx, req.user.id, 'file', id);
   });
   addLog({
     userId: req.user.id,
     action: 'file_delete',
     targetType: 'file',
     targetId: id,
-    detail: JSON.stringify({ physicalFileRemoved: removedFiles.length > 0 }),
+    detail: JSON.stringify({ trashBatchId: batchId }),
   }, req);
   res.json({ message: '删除成功' });
 }));
@@ -1543,7 +1645,7 @@ app.get('/files/:sha256/download', authRequired, asyncRoute(async (req, res, nex
     SELECT uf.name, f.id, f.sha256, f.size
     FROM user_files uf
     JOIN files f ON uf.file_id = f.id
-    WHERE f.sha256 = ? AND uf.user_id = ?
+    WHERE f.sha256 = ? AND uf.user_id = ? AND uf.deleted_at IS NULL
     ORDER BY uf.id LIMIT 1
   `, [sha256, req.user.id]);
   if (!record) throw new HttpError(404, '文件不存在');
@@ -1565,7 +1667,7 @@ app.get('/files/:sha256/thumbnail', authRequired, asyncRoute(async (req, res) =>
   const record = await get(`
     SELECT f.id, f.sha256, f.mime_type
     FROM user_files uf JOIN files f ON uf.file_id = f.id
-    WHERE f.sha256 = ? AND uf.user_id = ? LIMIT 1
+    WHERE f.sha256 = ? AND uf.user_id = ? AND uf.deleted_at IS NULL LIMIT 1
   `, [sha256, req.user.id]);
   if (!record) throw new HttpError(404, '文件不存在');
   const thumbnailPath = await getOrCreateThumbnail(record);
@@ -1619,6 +1721,8 @@ async function bootstrap(port = PORT) {
       .catch((err) => console.error('定期清理临时文件失败:', err.message));
     cleanupVerificationChallenges()
       .catch((err) => console.error('定期清理验证码失败:', err.message));
+    garbageCollectUnreferencedFiles()
+      .catch((err) => console.error('定期清理回收站失败:', err.message));
   }, 6 * 60 * 60 * 1000);
   maintenanceTimer.unref();
 
