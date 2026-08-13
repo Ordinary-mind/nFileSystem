@@ -118,7 +118,7 @@ async function main() {
   }
 
   const records = await all(`
-    SELECT id, stored_name, storage_key, md5, sha256, size
+    SELECT id, sha256, size
     FROM files ORDER BY id
   `);
   const logicalIssues = await collectLogicalIssues();

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-# 兼容旧版本以 root 创建的持久化目录，随后降权运行服务。
+# 初始化持久化目录，随后降权运行服务。
 mkdir -p /app/data /app/uploads/tmp
 
 # 显式指定非 root 用户运行容器时不再尝试修改宿主机目录所有权。

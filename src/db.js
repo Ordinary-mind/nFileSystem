@@ -88,26 +88,6 @@ function transaction(work) {
   });
 }
 
-async function addMissingFileColumns() {
-  const columns = await rawAll('PRAGMA table_info(files)');
-  const names = new Set(columns.map((column) => column.name));
-  if (!names.has('sha256')) {
-    await rawRun('ALTER TABLE files ADD COLUMN sha256 TEXT');
-  }
-  if (!names.has('storage_key')) {
-    await rawRun('ALTER TABLE files ADD COLUMN storage_key TEXT');
-  }
-  await rawRun('UPDATE files SET storage_key = md5 WHERE storage_key IS NULL OR storage_key = ?', ['']);
-}
-
-async function addMissingUserColumns() {
-  const columns = await rawAll('PRAGMA table_info(users)');
-  const names = new Set(columns.map((column) => column.name));
-  if (!names.has('credential_version')) {
-    await rawRun('ALTER TABLE users ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 1');
-  }
-}
-
 async function createIntegrityTriggers() {
   await rawExec(`
     DROP TRIGGER IF EXISTS trg_folder_parent_insert;
@@ -294,11 +274,29 @@ async function createSearchIndex() {
   }
 }
 
+async function assertBaselineDatabase() {
+  const version = await rawGet('PRAGMA user_version');
+  const tables = await rawGet(`
+    SELECT COUNT(*) AS count FROM sqlite_master
+    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+  `);
+  if (version.user_version === 0 && tables.count === 0) return;
+  if (version.user_version !== 1) {
+    throw new Error('数据库不是当前基线版本，请清空 DATA_DIR 后重新启动');
+  }
+  const fileColumns = await rawAll('PRAGMA table_info(files)');
+  const expected = ['id', 'sha256', 'size', 'mime_type', 'created_at'];
+  if (fileColumns.map((column) => column.name).join(',') !== expected.join(',')) {
+    throw new Error('数据库不是当前基线版本，请清空 DATA_DIR 后重新启动');
+  }
+}
+
 async function initDb() {
   return enqueue(async () => {
     await rawGet('PRAGMA journal_mode = WAL');
     await rawRun('PRAGMA synchronous = FULL');
     await rawRun('PRAGMA foreign_keys = ON');
+    await assertBaselineDatabase();
 
     await rawRun('BEGIN IMMEDIATE');
     try {
@@ -339,10 +337,7 @@ async function initDb() {
 
         CREATE TABLE IF NOT EXISTS files (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
-          stored_name TEXT NOT NULL,
-          storage_key TEXT NOT NULL,
-          md5 TEXT NOT NULL UNIQUE,
-          sha256 TEXT,
+          sha256 TEXT NOT NULL UNIQUE CHECK(length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
           size INTEGER NOT NULL CHECK (size >= 0),
           mime_type TEXT,
           created_at TEXT DEFAULT (datetime('now'))
@@ -415,11 +410,8 @@ async function initDb() {
         );
       `);
 
-      await addMissingFileColumns();
-      await addMissingUserColumns();
       await rawExec(`
-        CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256) WHERE sha256 IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256);
         CREATE INDEX IF NOT EXISTS idx_user_folders_list ON user_folders(user_id, parent_id, name);
         CREATE INDEX IF NOT EXISTS idx_user_files_list ON user_files(user_id, folder_id, id DESC);
         CREATE INDEX IF NOT EXISTS idx_user_files_duplicate ON user_files(user_id, folder_id, file_id, name);
@@ -439,7 +431,7 @@ async function initDb() {
       `);
       await createIntegrityTriggers();
       await createSearchIndex();
-      await rawRun('PRAGMA user_version = 4');
+      await rawRun('PRAGMA user_version = 1');
       await rawRun('COMMIT');
     } catch (err) {
       await rawRun('ROLLBACK');

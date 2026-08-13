@@ -43,6 +43,15 @@ test('认证页面提供邮箱验证码和密码管理入口', () => {
   assert.match(profileSource, /\/auth\/password\/change/);
 });
 
+test('上传使用原生 SHA-256 且不再加载 MD5 组件', () => {
+  const indexSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const uploadSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'features', 'upload.js'), 'utf8');
+  assert.doesNotMatch(indexSource, /spark-md5/i);
+  assert.match(uploadSource, /subtle\.digest\('SHA-256'/);
+  assert.match(uploadSource, /item\.sha256/);
+  assert.doesNotMatch(uploadSource, /md5/i);
+});
+
 test('图片预览缩放围绕焦点并限制平移边界', async () => {
   const { constrainImageTransform, zoomImageAt } = await loadImageViewer();
   const imageSize = { width: 300, height: 200 };

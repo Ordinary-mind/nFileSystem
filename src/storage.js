@@ -24,35 +24,22 @@ function isDigest(value, length) {
 }
 
 function getStoragePath(record) {
-  const storageKey = record.storage_key || record.sha256 || record.md5;
-  if (!isDigest(storageKey, 32) && !isDigest(storageKey, 64)) {
-    throw new Error('存储键不合法');
-  }
-  if (!record.stored_name || path.basename(record.stored_name) !== record.stored_name) {
-    throw new Error('存储文件名不合法');
-  }
-  return path.join(uploadRoot, storageKey.slice(0, 2), storageKey.slice(2, 4), record.stored_name);
-}
-
-function getSha256StoragePath(sha256) {
+  const sha256 = record && record.sha256;
   if (!isDigest(sha256, 64)) throw new Error('SHA-256 不合法');
   return path.join(uploadRoot, sha256.slice(0, 2), sha256.slice(2, 4), sha256);
 }
 
 function calculateHashes(filePath) {
   return new Promise((resolve, reject) => {
-    const md5 = crypto.createHash('md5');
     const sha256 = crypto.createHash('sha256');
     const stream = fs.createReadStream(filePath);
     let size = 0;
 
     stream.on('data', (chunk) => {
-      md5.update(chunk);
       sha256.update(chunk);
       size += chunk.length;
     });
     stream.on('end', () => resolve({
-      md5: md5.digest('hex'),
       sha256: sha256.digest('hex'),
       size,
     }));
@@ -124,7 +111,7 @@ async function copyAcrossDevices(sourcePath, targetPath, expectedSize, expectedS
 }
 
 async function finalizeTempFile(tempPath, sha256, expectedSize) {
-  const targetPath = getSha256StoragePath(sha256);
+  const targetPath = getStoragePath({ sha256 });
   const targetDir = path.dirname(targetPath);
   await fs.promises.mkdir(targetDir, { recursive: true });
 
@@ -147,7 +134,7 @@ async function finalizeTempFile(tempPath, sha256, expectedSize) {
 
   await unlinkIfExists(tempPath);
   if (created) await syncDirectory(targetDir);
-  return { targetPath, storedName: sha256, storageKey: sha256, created };
+  return { targetPath, created };
 }
 
 async function fileExists(filePath) {
@@ -194,9 +181,7 @@ async function verifyFileRecord(record, strong = false) {
     if (stat.size !== record.size) return { ok: false, reason: 'size_mismatch', filePath };
     if (strong) {
       const hashes = await calculateHashes(filePath);
-      const md5Matches = hashes.md5 === record.md5;
-      const sha256Matches = !record.sha256 || hashes.sha256 === record.sha256;
-      if (!md5Matches || !sha256Matches) return { ok: false, reason: 'hash_mismatch', filePath };
+      if (hashes.sha256 !== record.sha256) return { ok: false, reason: 'hash_mismatch', filePath };
     }
     return { ok: true, filePath };
   } catch (err) {

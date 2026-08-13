@@ -20,13 +20,7 @@ function hasRequiredScopes(grantedScopes, requiredScopes) {
 
 function getApiTokenFromRequest(req) {
   const fileToken = req.headers['n-file-token'];
-  if (fileToken) return String(fileToken).trim();
-
-  const authHeader = req.headers.authorization || '';
-  const [type, token] = authHeader.split(' ');
-  if (type === 'Bearer' && token) return token;
-
-  return '';
+  return fileToken ? String(fileToken).trim() : '';
 }
 
 /**

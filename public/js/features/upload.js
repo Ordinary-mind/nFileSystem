@@ -1,27 +1,17 @@
 import { request, uploadForm } from '../core/api.js';
 
-function calculateFileMd5(file) {
-  return new Promise((resolve, reject) => {
-    if (!window.SparkMD5) {
-      reject(new Error('文件指纹组件加载失败'));
-      return;
-    }
-    const chunkSize = 2 * 1024 * 1024;
-    const spark = new window.SparkMD5.ArrayBuffer();
-    const reader = new FileReader();
-    let offset = 0;
-    reader.onload = (event) => {
-      spark.append(event.target.result);
-      offset += chunkSize;
-      if (offset < file.size) readNext();
-      else resolve(spark.end());
-    };
-    reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
-    function readNext() {
-      reader.readAsArrayBuffer(file.slice(offset, offset + chunkSize));
-    }
-    readNext();
-  });
+async function calculateFileSha256(file) {
+  if (!globalThis.crypto?.subtle) return null;
+  try {
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return null;
+  }
+}
+
+function fingerprintKey(sha256, originalName) {
+  return `${sha256}\0${originalName}`;
 }
 
 export async function uploadFiles(files, folderId, onProgress) {
@@ -32,21 +22,27 @@ export async function uploadFiles(files, folderId, onProgress) {
     onProgress({ percent: Math.round(((index + 1) / input.length) * 30), label: `正在计算指纹 ${index + 1}/${input.length}` });
     prepared.push({
       file: input[index],
-      md5: await calculateFileMd5(input[index]),
+      sha256: await calculateFileSha256(input[index]),
       originalName: input[index].name,
     });
   }
 
-  onProgress({ percent: 35, label: '正在检查重复文件' });
-  const instant = await request('/files/instant', {
-    method: 'POST',
-    body: {
-      files: prepared.map(({ md5, originalName }) => ({ md5, originalName })),
-      folderId,
-    },
-  });
-  const pendingMd5 = new Set((instant.results || []).filter((item) => !item.success).map((item) => item.md5));
-  const pending = prepared.filter((item) => pendingMd5.has(item.md5));
+  const fingerprinted = prepared.filter((item) => item.sha256);
+  let completed = new Set();
+  if (fingerprinted.length) {
+    onProgress({ percent: 35, label: '正在检查重复文件' });
+    const instant = await request('/files/instant', {
+      method: 'POST',
+      body: {
+        files: fingerprinted.map(({ sha256, originalName }) => ({ sha256, originalName })),
+        folderId,
+      },
+    });
+    completed = new Set((instant.results || [])
+      .filter((item) => item.success)
+      .map((item) => fingerprintKey(item.sha256, item.originalName)));
+  }
+  const pending = prepared.filter((item) => !item.sha256 || !completed.has(fingerprintKey(item.sha256, item.originalName)));
   if (pending.length) {
     const form = new FormData();
     form.append('folderId', folderId || '');

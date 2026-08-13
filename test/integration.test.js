@@ -3,17 +3,15 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { after, before, test } = require('node:test');
 
-const bcrypt = require('bcrypt');
 const sqlite3 = require('sqlite3').verbose();
 const sharp = require('sharp');
 
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nfilesystem-test-'));
 const dataDir = path.join(testRoot, 'data');
 const uploadDir = path.join(testRoot, 'uploads');
-const legacyContent = Buffer.from('legacy file content');
-const legacyMd5 = crypto.createHash('md5').update(legacyContent).digest('hex');
 
 process.env.DATA_DIR = dataDir;
 process.env.UPLOAD_DIR = uploadDir;
@@ -24,6 +22,7 @@ process.env.ALLOW_REGISTER = 'true';
 process.env.USER_QUOTA_BYTES = String(1024 * 1024 * 1024);
 process.env.MIN_FREE_BYTES = '0';
 process.env.DRIVE_PAGE_SIZE = '200';
+process.env.AUTH_RATE_LIMIT = '1000';
 process.env.NODE_ENV = 'test';
 
 let appModule;
@@ -31,82 +30,8 @@ let dbModule;
 let storageModule;
 let mailerModule;
 let baseUrl;
-let legacyToken;
 let aliceToken;
 let bobToken;
-
-function legacyRun(db, sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function onRun(err) {
-      if (err) return reject(err);
-      return resolve({ lastID: this.lastID });
-    });
-  });
-}
-
-function legacyExec(db, sql) {
-  return new Promise((resolve, reject) => {
-    db.exec(sql, (err) => (err ? reject(err) : resolve()));
-  });
-}
-
-function legacyClose(db) {
-  return new Promise((resolve, reject) => db.close((err) => (err ? reject(err) : resolve())));
-}
-
-async function createLegacyFixture() {
-  await fs.promises.mkdir(dataDir, { recursive: true });
-  const db = new sqlite3.Database(path.join(dataDir, 'app.db'));
-  await legacyExec(db, `
-    CREATE TABLE users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL UNIQUE,
-      password TEXT NOT NULL,
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))
-    );
-    CREATE TABLE files (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      stored_name TEXT NOT NULL,
-      md5 TEXT NOT NULL UNIQUE,
-      size INTEGER NOT NULL,
-      mime_type TEXT,
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))
-    );
-    CREATE TABLE user_folders (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      parent_id INTEGER DEFAULT NULL,
-      name TEXT NOT NULL,
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))
-    );
-    CREATE TABLE user_files (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      folder_id INTEGER DEFAULT NULL,
-      file_id INTEGER NOT NULL,
-      name TEXT NOT NULL,
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))
-    );
-  `);
-  const password = await bcrypt.hash('legacy-pass', 10);
-  const user = await legacyRun(db, 'INSERT INTO users(name, password) VALUES (?, ?)', ['legacy', password]);
-  const storedName = `${legacyMd5}.txt`;
-  const file = await legacyRun(
-    db,
-    'INSERT INTO files(stored_name, md5, size, mime_type) VALUES (?, ?, ?, ?)',
-    [storedName, legacyMd5, legacyContent.length, 'text/plain']
-  );
-  await legacyRun(
-    db,
-    'INSERT INTO user_files(user_id, folder_id, file_id, name) VALUES (?, NULL, ?, ?)',
-    [user.lastID, file.lastID, 'legacy.txt']
-  );
-  await legacyClose(db);
-
-  const legacyDir = path.join(uploadDir, legacyMd5.slice(0, 2), legacyMd5.slice(2, 4));
-  await fs.promises.mkdir(legacyDir, { recursive: true });
-  await fs.promises.writeFile(path.join(legacyDir, storedName), legacyContent);
-}
 
 async function api(urlPath, options = {}) {
   const headers = { ...(options.headers || {}) };
@@ -158,8 +83,17 @@ async function createFolder(token, name, parentId = null) {
   return result.data.id;
 }
 
+function createVersionedDatabase(filePath, version) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(filePath);
+    db.exec(`CREATE TABLE files(id INTEGER PRIMARY KEY, md5 TEXT); PRAGMA user_version = ${version};`, (err) => {
+      if (err) return db.close(() => reject(err));
+      return db.close((closeErr) => (closeErr ? reject(closeErr) : resolve()));
+    });
+  });
+}
+
 before(async () => {
-  await createLegacyFixture();
   appModule = require('../src/app');
   dbModule = require('../src/db');
   storageModule = require('../src/storage');
@@ -173,27 +107,28 @@ after(async () => {
   await fs.promises.rm(testRoot, { recursive: true, force: true });
 });
 
-test('旧数据库与 MD5 存储路径可自动升级并继续下载', async () => {
+test('数据库使用 SHA-256 基线结构', async () => {
   const version = await dbModule.get('PRAGMA user_version');
-  assert.equal(version.user_version, 4);
-  const indexed = await dbModule.get("SELECT COUNT(*) AS count FROM drive_search WHERE name = 'legacy.txt'");
-  assert.equal(indexed.count, 1);
-  const record = await dbModule.get('SELECT storage_key, sha256 FROM files WHERE md5 = ?', [legacyMd5]);
-  assert.equal(record.storage_key, legacyMd5);
-  assert.equal(record.sha256, null);
-
-  const legacyUser = await dbModule.get("SELECT id, credential_version FROM users WHERE name = 'legacy'");
-  assert.equal(legacyUser.credential_version, 1);
-  await dbModule.run(
-    "INSERT INTO user_identities(user_id, provider, provider_subject, verified_at) VALUES (?, 'email', 'legacy@example.com', datetime('now'))",
-    [legacyUser.id]
+  assert.equal(version.user_version, 1);
+  const columns = await dbModule.all('PRAGMA table_info(files)');
+  assert.deepEqual(columns.map((column) => column.name), ['id', 'sha256', 'size', 'mime_type', 'created_at']);
+  await assert.rejects(
+    dbModule.run('INSERT INTO files(sha256, size) VALUES (?, ?)', [`${'a'.repeat(63)}z`, 1]),
+    /CHECK constraint failed/
   );
-  const login = await api('/auth/login', { method: 'POST', body: { email: 'legacy@example.com', password: 'legacy-pass' } });
-  assert.equal(login.response.status, 200);
-  legacyToken = login.data.token;
-  const download = await api(`/files/${legacyMd5}/download`, { token: legacyToken });
-  assert.equal(download.response.status, 200);
-  assert.deepEqual(download.data, legacyContent);
+});
+
+test('非基线数据库会拒绝启动', async () => {
+  const oldDataDir = path.join(testRoot, 'old-schema');
+  await fs.promises.mkdir(oldDataDir, { recursive: true });
+  await createVersionedDatabase(path.join(oldDataDir, 'app.db'), 4);
+  const result = spawnSync(process.execPath, ['-e', "require('./src/db').initDb().catch((err) => { console.error(err.message); process.exit(1); })"], {
+    cwd: path.join(__dirname, '..'),
+    env: { ...process.env, DATA_DIR: oldDataDir },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /数据库不是当前基线版本/);
 });
 
 test('安全响应头和健康检查可用', async () => {
@@ -245,8 +180,9 @@ test('邮箱注册、重置密码和修改密码形成完整安全闭环', async
   const firstToken = login.data.token;
 
   mailerModule.clearTestOutbox();
+  await dbModule.run('UPDATE verification_challenges SET sent_at = 0 WHERE provider_subject = ?', [email]);
   const duplicateCode = await api('/auth/email-codes', {
-    method: 'POST', body: { email: 'legacy@example.com', purpose: 'register' },
+    method: 'POST', body: { email, purpose: 'register' },
   });
   assert.equal(duplicateCode.response.status, 202);
   assert.equal(mailerModule.getTestOutbox().length, 0);
@@ -315,41 +251,41 @@ test('邮箱验证码连续错误五次后锁定', async () => {
   assert.equal(correctAfterLock.response.status, 400);
 });
 
-test('秒传不能通过全局 MD5 取得其他用户文件', async () => {
+test('秒传不能通过其他用户的 SHA-256 取得文件', async () => {
   aliceToken = await registerAndLogin('alice');
   bobToken = await registerAndLogin('bob');
   const content = Buffer.from('alice private content');
-  const md5 = crypto.createHash('md5').update(content).digest('hex');
+  const sha256 = crypto.createHash('sha256').update(content).digest('hex');
   const uploaded = await upload(aliceToken, 'private.txt', content);
   assert.equal(uploaded.response.status, 200);
 
   const instant = await api('/files/instant', {
     method: 'POST',
     token: bobToken,
-    body: { files: [{ md5, originalName: 'stolen.txt' }], folderId: null },
+    body: { files: [{ sha256, originalName: 'stolen.txt' }], folderId: null },
   });
   assert.equal(instant.response.status, 200);
   assert.equal(instant.data.results[0].success, false);
-  const download = await api(`/files/${md5}/download`, { token: bobToken });
+  const download = await api(`/files/${sha256}/download`, { token: bobToken });
   assert.equal(download.response.status, 404);
 });
 
 test('正常上传取得的共享内容不会被其他用户删除操作误回收', async () => {
   const content = Buffer.from('alice private content');
-  const md5 = crypto.createHash('md5').update(content).digest('hex');
+  const sha256 = crypto.createHash('sha256').update(content).digest('hex');
   const bobUpload = await upload(bobToken, 'owned-copy.txt', content);
   assert.equal(bobUpload.response.status, 200);
 
   const alice = await dbModule.get('SELECT id FROM users WHERE name = ?', ['alice@example.com']);
   const aliceReference = await dbModule.get(`
     SELECT uf.id FROM user_files uf JOIN files f ON f.id = uf.file_id
-    WHERE uf.user_id = ? AND f.md5 = ? LIMIT 1
-  `, [alice.id, md5]);
+    WHERE uf.user_id = ? AND f.sha256 = ? LIMIT 1
+  `, [alice.id, sha256]);
   const deleted = await api(`/drive/file/${aliceReference.id}`, { method: 'DELETE', token: aliceToken });
   assert.equal(deleted.response.status, 200);
-  assert.notEqual(await dbModule.get('SELECT id FROM files WHERE md5 = ?', [md5]), undefined);
+  assert.notEqual(await dbModule.get('SELECT id FROM files WHERE sha256 = ?', [sha256]), undefined);
 
-  const bobDownload = await api(`/files/${md5}/download`, { token: bobToken });
+  const bobDownload = await api(`/files/${sha256}/download`, { token: bobToken });
   assert.equal(bobDownload.response.status, 200);
   assert.deepEqual(bobDownload.data, content);
 });
@@ -390,6 +326,42 @@ test('全局搜索返回完整路径、隔离用户并同步重命名', async ()
   assert.notEqual(next.data.results[0].id, firstPage.data.results[0].id);
 });
 
+test('文件夹 ID 可猜测但不能跨用户访问或修改', async () => {
+  const aliceFolderId = await createFolder(aliceToken, 'alice-private-folder');
+  const aliceChildId = await createFolder(aliceToken, 'alice-private-child', aliceFolderId);
+  const uploaded = await upload(aliceToken, 'alice-private.txt', 'private folder content', aliceChildId);
+  assert.equal(uploaded.response.status, 200);
+
+  const bobFolderId = await createFolder(bobToken, 'bob-target-folder');
+  const listed = await api(`/drive?folderId=${aliceFolderId}`, { token: bobToken });
+  assert.equal(listed.response.status, 400);
+
+  const renamed = await api(`/drive/folder/${aliceFolderId}`, {
+    method: 'PUT',
+    token: bobToken,
+    body: { name: 'hijacked-folder' },
+  });
+  assert.equal(renamed.response.status, 404);
+
+  const moved = await api('/drive/move', {
+    method: 'POST',
+    token: bobToken,
+    body: { type: 'folder', id: aliceFolderId, targetFolderId: bobFolderId },
+  });
+  assert.equal(moved.response.status, 404);
+
+  const deleted = await api(`/drive/folder/${aliceFolderId}`, { method: 'DELETE', token: bobToken });
+  assert.equal(deleted.response.status, 404);
+
+  const ownerView = await api(`/drive?folderId=${aliceFolderId}`, { token: aliceToken });
+  assert.equal(ownerView.response.status, 200);
+  assert.deepEqual(ownerView.data.folders.map((folder) => folder.id), [aliceChildId]);
+  const childView = await api(`/drive?folderId=${aliceChildId}`, { token: aliceToken });
+  assert.equal(childView.response.status, 200);
+  assert.equal(childView.data.files.length, 1);
+  assert.equal(childView.data.files[0].name, 'alice-private.txt');
+});
+
 test('图片缩略图按所有者鉴权并生成 160 像素 WebP 缓存', async () => {
   const image = await sharp({
     create: { width: 320, height: 180, channels: 3, background: { r: 30, g: 120, b: 210 } },
@@ -399,13 +371,13 @@ test('图片缩略图按所有者鉴权并生成 160 像素 WebP 缓存', async 
   form.append('files', new Blob([image], { type: 'image/png' }), 'thumbnail.png');
   const uploaded = await api('/files/upload', { method: 'POST', token: aliceToken, form });
   assert.equal(uploaded.response.status, 200);
-  const md5 = crypto.createHash('md5').update(image).digest('hex');
+  const sha256 = crypto.createHash('sha256').update(image).digest('hex');
 
-  const denied = await api(`/files/${md5}/thumbnail`, { token: bobToken });
+  const denied = await api(`/files/${sha256}/thumbnail`, { token: bobToken });
   assert.equal(denied.response.status, 404);
   const [first, concurrent] = await Promise.all([
-    api(`/files/${md5}/thumbnail`, { token: aliceToken }),
-    api(`/files/${md5}/thumbnail`, { token: aliceToken }),
+    api(`/files/${sha256}/thumbnail`, { token: aliceToken }),
+    api(`/files/${sha256}/thumbnail`, { token: aliceToken }),
   ]);
   assert.equal(first.response.status, 200);
   assert.equal(concurrent.response.status, 200);
@@ -455,6 +427,14 @@ test('接入应用可通过独立 Token 隔离上传并创建访问链接', asyn
   });
   assert.equal(outside.response.status, 403);
 
+  const bearerFallback = await api('/api/v1/files', {
+    headers: { Authorization: `Bearer ${created.data.token.token}` },
+  });
+  assert.equal(bearerFallback.response.status, 401);
+  const oldAccessPath = uploaded.data.files[0].accessLink.path.replace('/n_file_system_api', '');
+  const oldAccess = await api(oldAccessPath);
+  assert.equal(oldAccess.response.status, 404);
+
   const tokens = await api(`/integrations/${created.data.integration.id}/tokens`, { token: aliceToken });
   assert.equal(tokens.response.status, 200);
   assert.equal(tokens.data.tokens.length, 1);
@@ -463,23 +443,23 @@ test('接入应用可通过独立 Token 隔离上传并创建访问链接', asyn
 
 test('相同内容不同扩展名只产生一个 SHA-256 物理文件', async () => {
   const content = Buffer.from('same content with different names');
-  const md5 = crypto.createHash('md5').update(content).digest('hex');
+  const sha256 = crypto.createHash('sha256').update(content).digest('hex');
   const first = await upload(aliceToken, 'same.pdf', content);
   const second = await upload(aliceToken, 'same.txt', content);
   assert.equal(first.response.status, 200);
   assert.equal(second.response.status, 200);
 
-  const rows = await dbModule.all('SELECT * FROM files WHERE md5 = ?', [md5]);
+  const rows = await dbModule.all('SELECT * FROM files WHERE sha256 = ?', [sha256]);
   assert.equal(rows.length, 1);
   assert.match(rows[0].sha256, /^[a-f0-9]{64}$/);
-  assert.equal(rows[0].stored_name, rows[0].sha256);
+  assert.equal(Object.keys(rows[0]).sort().join(','), 'created_at,id,mime_type,sha256,size');
   assert.equal(await storageModule.verifyFileRecord(rows[0], true).then((result) => result.ok), true);
 });
 
 test('等长损坏的去重文件不会覆盖正确上传内容', async () => {
   const content = Buffer.from('same content with different names');
-  const md5 = crypto.createHash('md5').update(content).digest('hex');
-  const record = await dbModule.get('SELECT * FROM files WHERE md5 = ?', [md5]);
+  const sha256 = crypto.createHash('sha256').update(content).digest('hex');
+  const record = await dbModule.get('SELECT * FROM files WHERE sha256 = ?', [sha256]);
   const filePath = storageModule.getStoragePath(record);
   const before = await dbModule.get('SELECT COUNT(*) AS count FROM user_files WHERE file_id = ?', [record.id]);
 
@@ -504,9 +484,8 @@ test('非法文件名和无效目录不会留下临时文件', async () => {
   const temporary = Buffer.from('temporary');
   const invalidFolder = await upload(aliceToken, 'valid.txt', temporary, 999999);
   assert.equal(invalidFolder.response.status, 400);
-  const md5 = crypto.createHash('md5').update(temporary).digest('hex');
   const sha256 = crypto.createHash('sha256').update(temporary).digest('hex');
-  assert.equal(await dbModule.get('SELECT id FROM files WHERE md5 = ?', [md5]), undefined);
+  assert.equal(await dbModule.get('SELECT id FROM files WHERE sha256 = ?', [sha256]), undefined);
   assert.equal(fs.existsSync(path.join(uploadDir, sha256.slice(0, 2), sha256.slice(2, 4), sha256)), false);
   const tempEntries = await fs.promises.readdir(storageModule.tempRoot);
   assert.deepEqual(tempEntries, []);
@@ -533,10 +512,10 @@ test('并发反向移动不能形成文件夹环', async () => {
 test('删除最后一个引用会回收数据库记录和物理文件', async () => {
   const folderId = await createFolder(aliceToken, 'delete-with-content');
   const content = Buffer.from(`delete-me-${crypto.randomUUID()}`);
-  const md5 = crypto.createHash('md5').update(content).digest('hex');
+  const sha256 = crypto.createHash('sha256').update(content).digest('hex');
   const uploaded = await upload(aliceToken, 'delete-me.bin', content, folderId);
   assert.equal(uploaded.response.status, 200);
-  const record = await dbModule.get('SELECT * FROM files WHERE md5 = ?', [md5]);
+  const record = await dbModule.get('SELECT * FROM files WHERE sha256 = ?', [sha256]);
   const filePath = storageModule.getStoragePath(record);
   assert.equal(fs.existsSync(filePath), true);
 

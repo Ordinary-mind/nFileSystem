@@ -274,7 +274,7 @@ async function requireFolderInsideRoot(folderId, rootFolderId, userId) {
 
 async function requireUserFileInsideRoot(userFileId, rootFolderId, userId) {
   const file = await get(
-    `SELECT uf.id, uf.folder_id, uf.name, f.id AS file_id, f.md5, f.sha256, f.size, f.mime_type, f.stored_name, f.storage_key
+    `SELECT uf.id, uf.folder_id, uf.name, f.id AS file_id, f.sha256, f.size, f.mime_type
      FROM user_files uf
      JOIN files f ON uf.file_id = f.id
      WHERE uf.id = ? AND uf.user_id = ?`,
@@ -411,8 +411,8 @@ async function getUserUsage(tx, userId) {
 }
 
 async function findFileRecordForUpload(tx, prepared) {
-  let record = await tx.get(`
-    SELECT id, stored_name, storage_key, md5, sha256, size, mime_type
+  const record = await tx.get(`
+    SELECT id, sha256, size, mime_type
     FROM files WHERE sha256 = ?
   `, [prepared.sha256]);
   if (record) {
@@ -423,26 +423,7 @@ async function findFileRecordForUpload(tx, prepared) {
     return record;
   }
 
-  record = await tx.get(`
-    SELECT id, stored_name, storage_key, md5, sha256, size, mime_type
-    FROM files WHERE md5 = ?
-  `, [prepared.md5]);
-  if (!record) return null;
-  if (record.sha256 && record.sha256 !== prepared.sha256) {
-    throw new HttpError(409, '检测到摘要冲突，已拒绝写入', 'HASH_COLLISION');
-  }
-
-  const existingPath = getStoragePath(record);
-  const existingHashes = await calculateHashes(existingPath);
-  if (existingHashes.size !== record.size || existingHashes.md5 !== record.md5) {
-    throw new HttpError(409, '已有物理文件完整性异常，请先运行存储校验', 'STORAGE_INTEGRITY_ERROR');
-  }
-  if (existingHashes.sha256 !== prepared.sha256) {
-    throw new HttpError(409, '检测到 MD5 冲突，已拒绝写入', 'HASH_COLLISION');
-  }
-  await tx.run('UPDATE files SET sha256 = ? WHERE id = ?', [prepared.sha256, record.id]);
-  record.sha256 = prepared.sha256;
-  return record;
+  return null;
 }
 
 async function persistUploadBatch(userId, folderId, preparedFiles) {
@@ -462,21 +443,15 @@ async function persistUploadBatch(userId, folderId, preparedFiles) {
             const finalized = await finalizeTempFile(prepared.path, prepared.sha256, prepared.size);
             if (finalized.created) createdBlobPaths.push(finalized.targetPath);
             const inserted = await tx.run(`
-              INSERT INTO files(stored_name, storage_key, md5, sha256, size, mime_type)
-              VALUES (?, ?, ?, ?, ?, ?)
+              INSERT INTO files(sha256, size, mime_type)
+              VALUES (?, ?, ?)
             `, [
-              finalized.storedName,
-              finalized.storageKey,
-              prepared.md5,
               prepared.sha256,
               prepared.size,
               prepared.mimeType,
             ]);
             fileRecord = {
               id: inserted.lastID,
-              stored_name: finalized.storedName,
-              storage_key: finalized.storageKey,
-              md5: prepared.md5,
               sha256: prepared.sha256,
               size: prepared.size,
               mime_type: prepared.mimeType,
@@ -491,7 +466,7 @@ async function persistUploadBatch(userId, folderId, preparedFiles) {
             saved.push({
               id: duplicate.id,
               name: prepared.originalName,
-              md5: prepared.md5,
+              sha256: prepared.sha256,
               size: prepared.size,
               duplicate: true,
             });
@@ -509,7 +484,7 @@ async function persistUploadBatch(userId, folderId, preparedFiles) {
           saved.push({
             id: inserted.lastID,
             name: prepared.originalName,
-            md5: prepared.md5,
+            sha256: prepared.sha256,
             size: prepared.size,
             duplicate: false,
           });
@@ -559,7 +534,7 @@ async function garbageCollectUnreferencedFiles() {
   return withStorageLock(async () => {
     const removed = await transaction(async (tx) => {
       const records = await tx.all(`
-        SELECT id, stored_name, storage_key, md5, sha256, size
+        SELECT id, sha256, size
         FROM files f
         WHERE NOT EXISTS (SELECT 1 FROM user_files uf WHERE uf.file_id = f.id)
       `);
@@ -935,7 +910,7 @@ app.get('/api/v1/files', apiTokenRequired(['files:read']), async (req, res) => {
     const folderId = req.query.folderId || req.apiAuth.rootFolderId;
     const targetFolderId = await requireFolderInsideRoot(folderId, req.apiAuth.rootFolderId, req.apiAuth.userId);
     const files = await all(
-      `SELECT uf.id, uf.name, uf.created_at, f.md5, f.size, f.mime_type
+      `SELECT uf.id, uf.name, uf.created_at, f.sha256, f.size, f.mime_type
        FROM user_files uf
        JOIN files f ON uf.file_id = f.id
        WHERE uf.user_id = ? AND uf.folder_id IS ?
@@ -1048,7 +1023,7 @@ app.post('/api/v1/files/:id/access-links', apiTokenRequired(['links:create']), a
       maxUses: req.body.maxUses,
       disposition: req.body.disposition,
     });
-    return res.json({ message: '创建访问链接成功', file: { id: file.id, name: file.name, md5: file.md5 }, accessLink: link });
+    return res.json({ message: '创建访问链接成功', file: { id: file.id, name: file.name, sha256: file.sha256 }, accessLink: link });
   } catch (err) {
     return res.status(500).json({ message: '创建访问链接失败', error: err.message });
   }
@@ -1059,8 +1034,7 @@ app.delete('/api/v1/files/:id', apiTokenRequired(['files:delete']), asyncRoute(a
   const removedFiles = await withStorageLock(async () => {
     const records = await transaction(async (tx) => {
       const file = await tx.get(
-        `SELECT uf.id, uf.folder_id, f.id AS file_id, f.stored_name, f.storage_key,
-                f.md5, f.sha256, f.size
+        `SELECT uf.id, uf.folder_id, f.id AS file_id, f.sha256, f.size
          FROM user_files uf
          JOIN files f ON f.id = uf.file_id
          WHERE uf.id = ? AND uf.user_id = ?`,
@@ -1092,7 +1066,7 @@ async function serveAccessLink(req, res, next) {
     const link = await transaction(async (tx) => {
       const record = await tx.get(
         `SELECT al.id, al.disposition, al.expires_at, al.max_uses, al.use_count, al.revoked_at,
-                uf.name, f.id AS file_id, f.md5, f.sha256, f.stored_name, f.storage_key,
+                uf.name, f.id AS file_id, f.sha256,
                 f.size, f.mime_type
          FROM access_links al
          JOIN user_files uf ON al.user_file_id = uf.id
@@ -1109,7 +1083,7 @@ async function serveAccessLink(req, res, next) {
 
     const verification = await verifyFileRecord(link, false);
     if (!verification.ok) throw new HttpError(404, '文件物理内容不存在或已损坏');
-    const fileName = normalizeFileName(req.query.name) || normalizeFileName(link.name) || link.stored_name;
+    const fileName = normalizeFileName(req.query.name) || normalizeFileName(link.name) || `${link.sha256}.bin`;
     if (link.mime_type) res.type(link.mime_type);
     if (link.disposition === 'download') {
       return res.download(verification.filePath, fileName, (err) => {
@@ -1126,7 +1100,6 @@ async function serveAccessLink(req, res, next) {
 }
 
 app.get('/n_file_system_api/access/:token', serveAccessLink);
-app.get('/access/:token', serveAccessLink);
 
 
 app.post('/files/upload', authRequired, asyncRoute(uploadCapacity), uploadMiddleware, asyncRoute(async (req, res) => {
@@ -1179,28 +1152,28 @@ app.post('/files/instant', authRequired, asyncRoute(async (req, res) => {
         output.push({ success: false, message: '文件参数不合法' });
         continue;
       }
-      const md5 = typeof item.md5 === 'string' ? item.md5.toLowerCase() : '';
+      const sha256 = typeof item.sha256 === 'string' ? item.sha256.toLowerCase() : '';
       const originalName = normalizeFileName(item.originalName);
-      if (!isDigest(md5, 32) || !originalName) {
-        output.push({ md5, originalName: item.originalName, success: false, message: 'md5 或 originalName 不合法' });
+      if (!isDigest(sha256, 64) || !originalName) {
+        output.push({ sha256, originalName: item.originalName, success: false, message: 'sha256 或 originalName 不合法' });
         continue;
       }
 
       // 秒传只复用当前用户已经持有的内容，避免通过摘要取得他人文件。
       const fileRecord = await tx.get(`
-        SELECT DISTINCT f.id, f.stored_name, f.storage_key, f.md5, f.sha256, f.size
+        SELECT DISTINCT f.id, f.sha256, f.size
         FROM files f
         JOIN user_files owned ON owned.file_id = f.id
-        WHERE f.md5 = ? AND owned.user_id = ?
-      `, [md5, req.user.id]);
+        WHERE f.sha256 = ? AND owned.user_id = ?
+      `, [sha256, req.user.id]);
       if (!fileRecord) {
-        output.push({ md5, originalName, success: false, message: '当前账号没有该文件，请走正常上传' });
+        output.push({ sha256, originalName, success: false, message: '当前账号没有该文件，请走正常上传' });
         continue;
       }
 
       const verification = await verifyFileRecord(fileRecord, false);
       if (!verification.ok) {
-        output.push({ md5, originalName, success: false, message: '物理文件异常，请重新上传' });
+        output.push({ sha256, originalName, success: false, message: '物理文件异常，请重新上传' });
         continue;
       }
       const duplicate = await tx.get(`
@@ -1208,11 +1181,11 @@ app.post('/files/instant', authRequired, asyncRoute(async (req, res) => {
         WHERE user_id = ? AND folder_id IS ? AND file_id = ? AND name = ?
       `, [req.user.id, folderId, fileRecord.id, originalName]);
       if (duplicate) {
-        output.push({ md5, originalName, success: true, id: duplicate.id, size: fileRecord.size, duplicate: true });
+        output.push({ sha256, originalName, success: true, id: duplicate.id, size: fileRecord.size, duplicate: true });
         continue;
       }
       if (USER_QUOTA_BYTES > 0 && usage + fileRecord.size > USER_QUOTA_BYTES) {
-        output.push({ md5, originalName, success: false, message: '用户存储配额不足' });
+        output.push({ sha256, originalName, success: false, message: '用户存储配额不足' });
         continue;
       }
 
@@ -1221,7 +1194,7 @@ app.post('/files/instant', authRequired, asyncRoute(async (req, res) => {
         [req.user.id, folderId, fileRecord.id, originalName]
       );
       usage += fileRecord.size;
-      output.push({ md5, originalName, success: true, id: inserted.lastID, size: fileRecord.size });
+      output.push({ sha256, originalName, success: true, id: inserted.lastID, size: fileRecord.size });
     }
     return output;
   });
@@ -1270,7 +1243,7 @@ app.get('/drive', authRequired, asyncRoute(async (req, res) => {
       LIMIT ? OFFSET ?
     `, folderParams);
     const files = await tx.all(`
-      SELECT uf.id, uf.name, uf.created_at, f.md5, f.size, f.mime_type
+      SELECT uf.id, uf.name, uf.created_at, f.sha256, f.size, f.mime_type
       FROM user_files uf
       JOIN files f ON uf.file_id = f.id
       WHERE uf.user_id = ? AND uf.folder_id IS ?${searchFileSql}
@@ -1361,7 +1334,7 @@ app.get('/drive/search', authRequired, asyncRoute(async (req, res) => {
       )
       SELECT CAST(ds.entity_id AS INTEGER) AS id, ds.entity_type AS type, ds.name, lower(ds.name) AS name_key,
              CAST(ds.parent_id AS INTEGER) AS folder_id, COALESCE(fp.path, '/') AS path,
-             f.md5, f.size, f.mime_type
+             f.sha256, f.size, f.mime_type
       FROM drive_search ds
       LEFT JOIN user_files uf ON ds.entity_type = 'file' AND uf.id = ds.entity_id
       LEFT JOIN files f ON uf.file_id = f.id
@@ -1432,7 +1405,7 @@ app.delete('/drive/folder/:id', authRequired, asyncRoute(async (req, res) => {
           WHERE f.user_id = ?
         )`;
       const candidates = await tx.all(`${tree}
-        SELECT DISTINCT f.id, f.stored_name, f.storage_key, f.md5, f.sha256, f.size
+        SELECT DISTINCT f.id, f.sha256, f.size
         FROM files f JOIN user_files uf ON uf.file_id = f.id
         WHERE uf.user_id = ? AND uf.folder_id IN (SELECT id FROM tree)
       `, [id, req.user.id, req.user.id, req.user.id]);
@@ -1483,7 +1456,7 @@ app.delete('/drive/file/:id', authRequired, asyncRoute(async (req, res) => {
   const removedFiles = await withStorageLock(async () => {
     const records = await transaction(async (tx) => {
       const file = await tx.get(`
-        SELECT uf.id, f.id AS file_id, f.stored_name, f.storage_key, f.md5, f.sha256, f.size
+        SELECT uf.id, f.id AS file_id, f.sha256, f.size
         FROM user_files uf JOIN files f ON f.id = uf.file_id
         WHERE uf.id = ? AND uf.user_id = ?
       `, [id, req.user.id]);
@@ -1563,21 +1536,21 @@ app.post('/drive/move', authRequired, asyncRoute(async (req, res) => {
   res.json({ message: '移动成功' });
 }));
 
-app.get('/files/:md5/download', authRequired, asyncRoute(async (req, res, next) => {
-  const md5 = String(req.params.md5 || '').toLowerCase();
-  if (!isDigest(md5, 32)) throw new HttpError(400, 'md5 不合法');
+app.get('/files/:sha256/download', authRequired, asyncRoute(async (req, res, next) => {
+  const sha256 = String(req.params.sha256 || '').toLowerCase();
+  if (!isDigest(sha256, 64)) throw new HttpError(400, 'sha256 不合法');
   const record = await get(`
-    SELECT uf.name, f.id, f.stored_name, f.storage_key, f.md5, f.sha256, f.size
+    SELECT uf.name, f.id, f.sha256, f.size
     FROM user_files uf
     JOIN files f ON uf.file_id = f.id
-    WHERE f.md5 = ? AND uf.user_id = ?
+    WHERE f.sha256 = ? AND uf.user_id = ?
     ORDER BY uf.id LIMIT 1
-  `, [md5, req.user.id]);
+  `, [sha256, req.user.id]);
   if (!record) throw new HttpError(404, '文件不存在');
   const verification = await verifyFileRecord(record, false);
   if (!verification.ok) throw new HttpError(409, '文件物理内容异常，请联系管理员');
   const requestedName = normalizeFileName(req.query.name);
-  const fileName = requestedName || normalizeFileName(record.name) || `${md5}.bin`;
+  const fileName = requestedName || normalizeFileName(record.name) || `${sha256}.bin`;
 
   addLog({ userId: req.user.id, action: 'download', targetType: 'file', targetId: record.id }, req);
   res.download(verification.filePath, fileName, (err) => {
@@ -1586,18 +1559,18 @@ app.get('/files/:md5/download', authRequired, asyncRoute(async (req, res, next) 
   });
 }));
 
-app.get('/files/:md5/thumbnail', authRequired, asyncRoute(async (req, res) => {
-  const md5 = String(req.params.md5 || '').toLowerCase();
-  if (!isDigest(md5, 32)) throw new HttpError(400, 'md5 不合法');
+app.get('/files/:sha256/thumbnail', authRequired, asyncRoute(async (req, res) => {
+  const sha256 = String(req.params.sha256 || '').toLowerCase();
+  if (!isDigest(sha256, 64)) throw new HttpError(400, 'sha256 不合法');
   const record = await get(`
-    SELECT f.id, f.stored_name, f.storage_key, f.md5, f.sha256, f.mime_type
+    SELECT f.id, f.sha256, f.mime_type
     FROM user_files uf JOIN files f ON uf.file_id = f.id
-    WHERE f.md5 = ? AND uf.user_id = ? LIMIT 1
-  `, [md5, req.user.id]);
+    WHERE f.sha256 = ? AND uf.user_id = ? LIMIT 1
+  `, [sha256, req.user.id]);
   if (!record) throw new HttpError(404, '文件不存在');
   const thumbnailPath = await getOrCreateThumbnail(record);
   if (!thumbnailPath) throw new HttpError(415, '该文件无法生成缩略图');
-  const etag = `"thumbnail-v1-${record.sha256 || record.storage_key || record.md5}"`;
+  const etag = `"thumbnail-v1-${record.sha256}"`;
   res.set({
     'Content-Type': 'image/webp',
     'Cache-Control': 'private, max-age=31536000, immutable',

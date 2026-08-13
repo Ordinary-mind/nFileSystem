@@ -13,7 +13,7 @@ const waiters = [];
 let active = 0;
 
 function cacheKey(record) {
-  return record.sha256 || record.storage_key || record.md5;
+  return record.sha256;
 }
 
 function getThumbnailPath(record) {

@@ -115,9 +115,9 @@ export function mountDrive(root, folderId, navigate, route = {}) {
       ? `${isFolder ? '文件夹' : formatSize(item.size)} · ${escapeHtml(item.path || '/')}`
       : (isFolder ? `文件夹 · ${formatDate(item.created_at)}` : `${formatSize(item.size)} · ${escapeHtml(getExtension(item.name).toUpperCase() || '文件')} · ${formatDate(item.created_at)}`);
     const thumbnail = !isFolder && /^image\/(jpeg|png|webp|gif|avif)$/i.test(item.mime_type || '')
-      ? ` data-thumbnail="${escapeHtml(item.md5)}"` : '';
+      ? ` data-thumbnail="${escapeHtml(item.sha256)}"` : '';
     return `
-      <article class="drive-row ${selected.has(selectionKey(item)) ? 'selected' : ''}" data-type="${item.type}" data-id="${item.id}" data-name="${escapeHtml(item.name)}" data-md5="${escapeHtml(item.md5 || '')}" data-mime-type="${escapeHtml(item.mime_type || '')}">
+      <article class="drive-row ${selected.has(selectionKey(item)) ? 'selected' : ''}" data-type="${item.type}" data-id="${item.id}" data-name="${escapeHtml(item.name)}" data-sha256="${escapeHtml(item.sha256 || '')}" data-mime-type="${escapeHtml(item.mime_type || '')}">
         <button type="button" class="drive-main" data-open>
           <span class="file-symbol ${isFolder ? 'folder-symbol' : ''}"${thumbnail}>${icon(isFolder ? 'folder' : fileIconName(item.name))}</span>
           <span class="drive-text"><strong>${escapeHtml(item.name)}</strong><small>${meta}</small></span>
@@ -349,7 +349,7 @@ export function mountDrive(root, folderId, navigate, route = {}) {
 
   async function downloadFile(item) {
     try {
-      const blob = await requestBlob(`/files/${item.md5}/download?name=${encodeURIComponent(item.name)}`);
+      const blob = await requestBlob(`/files/${item.sha256}/download?name=${encodeURIComponent(item.name)}`);
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -381,7 +381,7 @@ export function mountDrive(root, folderId, navigate, route = {}) {
     window.addEventListener('popstate', onPopState, { once: true });
     const body = panel.overlay.querySelector('.overlay-body');
     try {
-      const blob = await requestBlob(`/files/${item.md5}/download`);
+      const blob = await requestBlob(`/files/${item.sha256}/download`);
       if (!panel.overlay.isConnected) return;
       if (IMAGE_EXTENSIONS.has(ext)) {
         const previewBlob = ext === 'svg' && blob.type !== 'image/svg+xml'
@@ -505,7 +505,7 @@ export function mountDrive(root, folderId, navigate, route = {}) {
     }
     const row = event.target.closest('.drive-row');
     if (!row) return;
-    const item = { type: row.dataset.type, id: row.dataset.id, name: row.dataset.name, md5: row.dataset.md5, mime_type: row.dataset.mimeType };
+    const item = { type: row.dataset.type, id: row.dataset.id, name: row.dataset.name, sha256: row.dataset.sha256, mime_type: row.dataset.mimeType };
     if (selected.size) toggleSelection(item);
     else if (event.target.closest('[data-more]')) openItemActions(item);
     else if (event.target.closest('[data-open]')) item.type === 'folder' ? goFolder(item.id) : previewFile(item);
@@ -518,7 +518,7 @@ export function mountDrive(root, folderId, navigate, route = {}) {
     window.clearTimeout(longPressTimer);
     longPressTimer = window.setTimeout(() => {
       if (!longPressRow?.isConnected) return;
-      const item = { type: row.dataset.type, id: row.dataset.id, name: row.dataset.name, md5: row.dataset.md5, mime_type: row.dataset.mimeType };
+      const item = { type: row.dataset.type, id: row.dataset.id, name: row.dataset.name, sha256: row.dataset.sha256, mime_type: row.dataset.mimeType };
       toggleSelection(item);
       suppressClickUntil = Date.now() + 700;
       navigator.vibrate?.(25);
