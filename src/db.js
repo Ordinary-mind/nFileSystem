@@ -174,13 +174,15 @@ async function createIntegrityTriggers() {
     END;
 
     CREATE TRIGGER trg_user_file_update
-    BEFORE UPDATE OF user_id, folder_id, file_id ON user_files
-    WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id)
+    BEFORE UPDATE OF user_id, folder_id, file_id, deleted_at ON user_files
+    WHEN NEW.deleted_at IS NULL AND (
+      NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id)
       OR NOT EXISTS (SELECT 1 FROM files WHERE id = NEW.file_id)
       OR (NEW.folder_id IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM user_folders
         WHERE id = NEW.folder_id AND user_id = NEW.user_id AND deleted_at IS NULL
       ))
+    )
     BEGIN
       SELECT RAISE(ABORT, 'invalid user file reference');
     END;
@@ -197,8 +199,8 @@ async function createIntegrityTriggers() {
     END;
 
     CREATE TRIGGER trg_user_file_duplicate_update
-    BEFORE UPDATE OF user_id, folder_id, file_id, name ON user_files
-    WHEN EXISTS (
+    BEFORE UPDATE OF user_id, folder_id, file_id, name, deleted_at ON user_files
+    WHEN NEW.deleted_at IS NULL AND EXISTS (
       SELECT 1 FROM user_files
       WHERE user_id = NEW.user_id AND folder_id IS NEW.folder_id
         AND file_id = NEW.file_id AND name = NEW.name AND id != OLD.id AND deleted_at IS NULL

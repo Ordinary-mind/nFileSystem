@@ -279,7 +279,7 @@ async function requireUserFileInsideRoot(userFileId, rootFolderId, userId) {
     `SELECT uf.id, uf.folder_id, uf.name, f.id AS file_id, f.sha256, f.size, f.mime_type
      FROM user_files uf
      JOIN files f ON uf.file_id = f.id
-     WHERE uf.id = ? AND uf.user_id = ?`,
+     WHERE uf.id = ? AND uf.user_id = ? AND uf.deleted_at IS NULL`,
     [userFileId, userId]
   );
   if (!file) return null;
@@ -543,6 +543,10 @@ async function garbageCollectUnreferencedFiles() {
     const removed = await transaction(async (tx) => {
       await tx.run(`DELETE FROM user_files WHERE deleted_at IS NOT NULL AND datetime(deleted_at, ?) <= datetime('now')`, [`+${TRASH_RETENTION_DAYS} days`]);
       await tx.run(`DELETE FROM user_folders WHERE deleted_at IS NOT NULL AND datetime(deleted_at, ?) <= datetime('now')`, [`+${TRASH_RETENTION_DAYS} days`]);
+      await tx.run(`DELETE FROM trash_batches
+        WHERE datetime(deleted_at, ?) <= datetime('now')
+          OR (item_type = 'file' AND NOT EXISTS (SELECT 1 FROM user_files WHERE id = trash_batches.item_id AND trash_batch_id = trash_batches.id))
+          OR (item_type = 'folder' AND NOT EXISTS (SELECT 1 FROM user_folders WHERE id = trash_batches.item_id AND trash_batch_id = trash_batches.id))`, [`+${TRASH_RETENTION_DAYS} days`]);
       const records = await tx.all(`
         SELECT id, sha256, size FROM files f
         WHERE NOT EXISTS (SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NULL)
@@ -596,6 +600,18 @@ async function listTrash(userId) {
     LEFT JOIN user_folders fo ON b.item_type = 'folder' AND fo.id = b.item_id
     WHERE b.user_id = ? ORDER BY b.id DESC
   `, [userId]);
+}
+
+async function permanentlyDeleteTrashBatch(tx, userId, batchId) {
+  const batch = await tx.get('SELECT id FROM trash_batches WHERE id = ? AND user_id = ?', [batchId, userId]);
+  if (!batch) throw new HttpError(404, '回收站项目不存在');
+  // 保留独立删除批次的子树，避免父目录的外键级联越过批次边界。
+  await tx.run(`UPDATE user_folders SET parent_id = NULL
+    WHERE user_id = ? AND trash_batch_id != ?
+      AND parent_id IN (SELECT id FROM user_folders WHERE trash_batch_id = ?)`, [userId, batchId, batchId]);
+  await tx.run('DELETE FROM user_files WHERE trash_batch_id = ?', [batchId]);
+  await tx.run('DELETE FROM user_folders WHERE trash_batch_id = ?', [batchId]);
+  await tx.run('DELETE FROM trash_batches WHERE id = ?', [batchId]);
 }
 
 
@@ -1113,7 +1129,7 @@ async function serveAccessLink(req, res, next) {
          FROM access_links al
          JOIN user_files uf ON al.user_file_id = uf.id
          JOIN files f ON uf.file_id = f.id
-         WHERE al.token_hash = ?`,
+         WHERE al.token_hash = ? AND uf.deleted_at IS NULL`,
         [hashApiToken(token)]
       );
       if (!record || record.revoked_at) throw new HttpError(404, '访问链接不存在');
@@ -1421,11 +1437,7 @@ app.post('/api/v1/trash/:batchId/restore', apiTokenRequired(['files:upload']), a
 app.delete('/api/v1/trash/:batchId', apiTokenRequired(['files:delete']), asyncRoute(async (req, res) => {
   const batchId = parseRequiredId(req.params.batchId, 'batchId');
   await transaction(async (tx) => {
-    const batch = await tx.get('SELECT id FROM trash_batches WHERE id = ? AND user_id = ?', [batchId, req.apiAuth.userId]);
-    if (!batch) throw new HttpError(404, '回收站项目不存在');
-    await tx.run('DELETE FROM user_files WHERE trash_batch_id = ?', [batchId]);
-    await tx.run('DELETE FROM user_folders WHERE trash_batch_id = ?', [batchId]);
-    await tx.run('DELETE FROM trash_batches WHERE id = ?', [batchId]);
+    await permanentlyDeleteTrashBatch(tx, req.apiAuth.userId, batchId);
   });
   await garbageCollectUnreferencedFiles();
   res.json({ message: '已永久删除' });
@@ -1464,11 +1476,7 @@ app.post('/drive/trash/:batchId/restore', authRequired, asyncRoute(async (req, r
 app.delete('/drive/trash/:batchId', authRequired, asyncRoute(async (req, res) => {
   const batchId = parseRequiredId(req.params.batchId, 'batchId');
   await transaction(async (tx) => {
-    const batch = await tx.get('SELECT id FROM trash_batches WHERE id = ? AND user_id = ?', [batchId, req.user.id]);
-    if (!batch) throw new HttpError(404, '回收站项目不存在');
-    await tx.run('DELETE FROM user_files WHERE trash_batch_id = ?', [batchId]);
-    await tx.run('DELETE FROM user_folders WHERE trash_batch_id = ?', [batchId]);
-    await tx.run('DELETE FROM trash_batches WHERE id = ?', [batchId]);
+    await permanentlyDeleteTrashBatch(tx, req.user.id, batchId);
   });
   await garbageCollectUnreferencedFiles();
   res.json({ message: '已永久删除' });

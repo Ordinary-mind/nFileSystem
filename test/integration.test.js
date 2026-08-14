@@ -549,6 +549,26 @@ test('回收站恢复与永久删除遵循用户引用隔离', async () => {
   assert.equal(restoredView.data.files.some((file) => file.id === aliceFileId), true);
 });
 
+test('回收站文件不能重新创建访问链接，恢复冲突会被拒绝', async () => {
+  const created = await api('/integrations', { method: 'POST', token: aliceToken, body: {
+    name: `trash-links-${crypto.randomUUID()}`, rootFolderName: `trash-links-root-${crypto.randomUUID()}`,
+    scopes: ['files:upload', 'files:read', 'files:delete', 'links:create'], createToken: true,
+  } });
+  const content = Buffer.from(`trash-link-${crypto.randomUUID()}`);
+  const uploaded = await upload(aliceToken, 'trash-link.bin', content);
+  const fileId = uploaded.data.files[0].id;
+  assert.equal((await api(`/drive/file/${fileId}`, { method: 'DELETE', token: aliceToken })).response.status, 200);
+  const link = await api(`/api/v1/files/${fileId}/access-links`, { method: 'POST', headers: { 'N-File-Token': created.data.token.token }, body: {} });
+  assert.equal(link.response.status, 404);
+  const duplicate = await upload(aliceToken, 'trash-link-copy.bin', content);
+  assert.equal(duplicate.response.status, 200);
+  await dbModule.run('UPDATE user_files SET name = ? WHERE id = ?', ['trash-link.bin', duplicate.data.files[0].id]);
+  const trash = await api('/drive/trash', { token: aliceToken });
+  const item = trash.data.items.find((entry) => entry.item_type === 'file' && entry.item_id === fileId);
+  const restored = await api(`/drive/trash/${item.batch_id}/restore`, { method: 'POST', token: aliceToken });
+  assert.equal(restored.response.status, 409);
+});
+
 test('目录列表支持稳定分页', async () => {
   const parentId = await createFolder(aliceToken, 'paged');
   const user = await dbModule.get('SELECT id FROM users WHERE name = ?', ['alice@example.com']);
