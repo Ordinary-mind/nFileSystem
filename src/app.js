@@ -588,18 +588,29 @@ async function markTrashBatch(tx, userId, type, id) {
   return batch.lastID;
 }
 
-async function listTrash(userId) {
-  return all(`
+const trashListSql = `
     SELECT b.id AS batch_id, b.item_type, b.item_id, b.deleted_at,
       CASE WHEN b.item_type = 'file' THEN uf.name ELSE fo.name END AS name,
       CASE WHEN b.item_type = 'file' THEN f.size ELSE NULL END AS size,
-      CASE WHEN b.item_type = 'file' THEN f.sha256 ELSE NULL END AS sha256
+      CASE WHEN b.item_type = 'file' THEN f.sha256 ELSE NULL END AS sha256,
+      CASE WHEN b.item_type = 'file' THEN uf.folder_id ELSE fo.id END AS scope_folder_id
     FROM trash_batches b
     LEFT JOIN user_files uf ON b.item_type = 'file' AND uf.id = b.item_id
     LEFT JOIN files f ON uf.file_id = f.id
     LEFT JOIN user_folders fo ON b.item_type = 'folder' AND fo.id = b.item_id
     WHERE b.user_id = ? ORDER BY b.id DESC
-  `, [userId]);
+  `;
+
+function listTrashWith(query, userId) {
+  return query(trashListSql, [userId]);
+}
+
+function listTrash(userId) {
+  return listTrashWith(all, userId);
+}
+
+async function isTrashItemInsideRoot(item, rootFolderId, userId, query = get) {
+  return isFolderInsideRoot(item.scope_folder_id, rootFolderId, userId, query);
 }
 
 async function permanentlyDeleteTrashBatch(tx, userId, batchId) {
@@ -607,7 +618,7 @@ async function permanentlyDeleteTrashBatch(tx, userId, batchId) {
   if (!batch) throw new HttpError(404, '回收站项目不存在');
   // 保留独立删除批次的子树，避免父目录的外键级联越过批次边界。
   await tx.run(`UPDATE user_folders SET parent_id = NULL
-    WHERE user_id = ? AND trash_batch_id != ?
+    WHERE user_id = ? AND COALESCE(trash_batch_id, -1) != ?
       AND parent_id IN (SELECT id FROM user_folders WHERE trash_batch_id = ?)`, [userId, batchId, batchId]);
   await tx.run('DELETE FROM user_files WHERE trash_batch_id = ?', [batchId]);
   await tx.run('DELETE FROM user_folders WHERE trash_batch_id = ?', [batchId]);
@@ -982,12 +993,12 @@ app.get('/api/v1/files', apiTokenRequired(['files:read']), async (req, res) => {
       `SELECT uf.id, uf.name, uf.created_at, f.sha256, f.size, f.mime_type
        FROM user_files uf
        JOIN files f ON uf.file_id = f.id
-       WHERE uf.user_id = ? AND uf.folder_id IS ?
+       WHERE uf.user_id = ? AND uf.folder_id IS ? AND uf.deleted_at IS NULL
        ORDER BY uf.id DESC`,
       [req.apiAuth.userId, targetFolderId]
     );
     const folders = await all(
-      'SELECT id, name, created_at FROM user_folders WHERE user_id = ? AND parent_id IS ? ORDER BY name',
+      'SELECT id, name, created_at FROM user_folders WHERE user_id = ? AND parent_id IS ? AND deleted_at IS NULL ORDER BY name',
       [req.apiAuth.userId, targetFolderId]
     );
     return res.json({ rootFolderId: req.apiAuth.rootFolderId, folderId: targetFolderId, folders, files });
@@ -1415,7 +1426,10 @@ app.get('/drive/trash', authRequired, asyncRoute(async (req, res) => {
 }));
 
 app.get('/api/v1/trash', apiTokenRequired(['files:read']), asyncRoute(async (req, res) => {
-  const items = await listTrash(req.apiAuth.userId);
+  const allItems = await listTrash(req.apiAuth.userId);
+  const items = (await Promise.all(allItems.map(async (item) => (
+    (await isTrashItemInsideRoot(item, req.apiAuth.rootFolderId, req.apiAuth.userId)) ? item : null
+  )))).filter(Boolean);
   res.json({ items, retentionDays: TRASH_RETENTION_DAYS });
 }));
 
@@ -1424,9 +1438,11 @@ app.post('/api/v1/trash/:batchId/restore', apiTokenRequired(['files:upload']), a
   const restored = await transaction(async (tx) => {
     const batch = await tx.get('SELECT * FROM trash_batches WHERE id = ? AND user_id = ? AND item_type = ?', [batchId, req.apiAuth.userId, 'file']);
     if (!batch || Date.now() - new Date(batch.deleted_at).getTime() >= TRASH_RETENTION_MS) throw new HttpError(404, '回收站项目不存在或已过期');
-    const file = await tx.get('SELECT id, folder_id FROM user_files WHERE id = ? AND trash_batch_id = ?', [batch.item_id, batchId]);
+    const file = await tx.get('SELECT id, folder_id, file_id, name FROM user_files WHERE id = ? AND trash_batch_id = ?', [batch.item_id, batchId]);
     const query = (sql, params) => tx.get(sql, params);
     if (!file || !(await isFolderInsideRoot(file.folder_id, req.apiAuth.rootFolderId, req.apiAuth.userId, query))) throw new HttpError(403, '回收站项目不在应用根目录内');
+    const duplicate = await tx.get('SELECT id FROM user_files WHERE user_id = ? AND folder_id IS ? AND file_id = ? AND name = ? AND deleted_at IS NULL AND id != ?', [req.apiAuth.userId, file.folder_id, file.file_id, file.name, file.id]);
+    if (duplicate) throw new HttpError(409, '同名文件已存在');
     await tx.run('UPDATE user_files SET deleted_at = NULL, trash_batch_id = NULL WHERE id = ?', [file.id]);
     await tx.run('DELETE FROM trash_batches WHERE id = ?', [batchId]);
     return file.id;
@@ -1437,6 +1453,10 @@ app.post('/api/v1/trash/:batchId/restore', apiTokenRequired(['files:upload']), a
 app.delete('/api/v1/trash/:batchId', apiTokenRequired(['files:delete']), asyncRoute(async (req, res) => {
   const batchId = parseRequiredId(req.params.batchId, 'batchId');
   await transaction(async (tx) => {
+    const item = (await listTrashWith(tx.all, req.apiAuth.userId)).find((entry) => entry.batch_id === batchId);
+    if (!item || !(await isTrashItemInsideRoot(item, req.apiAuth.rootFolderId, req.apiAuth.userId, tx.get))) {
+      throw new HttpError(404, '回收站项目不存在或不在应用根目录内');
+    }
     await permanentlyDeleteTrashBatch(tx, req.apiAuth.userId, batchId);
   });
   await garbageCollectUnreferencedFiles();
@@ -1445,9 +1465,12 @@ app.delete('/api/v1/trash/:batchId', apiTokenRequired(['files:delete']), asyncRo
 
 app.delete('/api/v1/trash', apiTokenRequired(['files:delete']), asyncRoute(async (req, res) => {
   await transaction(async (tx) => {
-    await tx.run('DELETE FROM user_files WHERE user_id = ? AND deleted_at IS NOT NULL', [req.apiAuth.userId]);
-    await tx.run('DELETE FROM user_folders WHERE user_id = ? AND deleted_at IS NOT NULL', [req.apiAuth.userId]);
-    await tx.run('DELETE FROM trash_batches WHERE user_id = ?', [req.apiAuth.userId]);
+    const items = await listTrashWith(tx.all, req.apiAuth.userId);
+    for (const item of items) {
+      if (await isTrashItemInsideRoot(item, req.apiAuth.rootFolderId, req.apiAuth.userId, tx.get)) {
+        await permanentlyDeleteTrashBatch(tx, req.apiAuth.userId, item.batch_id);
+      }
+    }
   });
   await garbageCollectUnreferencedFiles();
   res.json({ message: '回收站已清空' });
@@ -1460,11 +1483,29 @@ app.post('/drive/trash/:batchId/restore', authRequired, asyncRoute(async (req, r
     if (!batch) throw new HttpError(404, '回收站项目不存在');
     if (Date.now() - new Date(batch.deleted_at).getTime() >= TRASH_RETENTION_MS) throw new HttpError(410, '回收站项目已过期');
     if (batch.item_type === 'file') {
-      const file = await tx.get('SELECT id, folder_id, name FROM user_files WHERE id = ? AND trash_batch_id = ?', [batch.item_id, batchId]);
+      const file = await tx.get('SELECT id, folder_id, file_id, name FROM user_files WHERE id = ? AND trash_batch_id = ?', [batch.item_id, batchId]);
       if (!file) throw new HttpError(410, '文件内容已清理');
+      const duplicate = await tx.get('SELECT id FROM user_files WHERE user_id = ? AND folder_id IS ? AND file_id = ? AND name = ? AND deleted_at IS NULL AND id != ?', [req.user.id, file.folder_id, file.file_id, file.name, file.id]);
+      if (duplicate) throw new HttpError(409, '同名文件已存在');
       await tx.run('UPDATE user_files SET deleted_at = NULL, trash_batch_id = NULL WHERE id = ?', [file.id]);
     } else {
-      await tx.run('UPDATE user_folders SET deleted_at = NULL, trash_batch_id = NULL WHERE trash_batch_id = ?', [batchId]);
+      const root = await tx.get('SELECT id, parent_id FROM user_folders WHERE id = ? AND trash_batch_id = ?', [batch.item_id, batchId]);
+      if (!root) throw new HttpError(410, '文件夹内容已清理');
+      if (root.parent_id !== null) {
+        const parent = await tx.get('SELECT id FROM user_folders WHERE id = ? AND user_id = ? AND deleted_at IS NULL', [root.parent_id, req.user.id]);
+        if (!parent) throw new HttpError(409, '原父文件夹仍在回收站中，请先恢复父文件夹');
+      }
+      const folders = await tx.all(`
+        WITH RECURSIVE tree(id, depth) AS (
+          SELECT id, 0 FROM user_folders WHERE id = ? AND trash_batch_id = ?
+          UNION ALL
+          SELECT f.id, t.depth + 1 FROM user_folders f JOIN tree t ON f.parent_id = t.id
+          WHERE f.trash_batch_id = ?
+        ) SELECT id FROM tree ORDER BY depth
+      `, [root.id, batchId, batchId]);
+      for (const folder of folders) {
+        await tx.run('UPDATE user_folders SET deleted_at = NULL, trash_batch_id = NULL WHERE id = ?', [folder.id]);
+      }
       await tx.run('UPDATE user_files SET deleted_at = NULL, trash_batch_id = NULL WHERE trash_batch_id = ?', [batchId]);
     }
     await tx.run('DELETE FROM trash_batches WHERE id = ?', [batchId]);

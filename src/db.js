@@ -113,12 +113,14 @@ async function createIntegrityTriggers() {
     END;
 
     CREATE TRIGGER trg_folder_parent_update
-    BEFORE UPDATE OF parent_id, user_id ON user_folders
-    WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id)
+    BEFORE UPDATE OF parent_id, user_id, deleted_at ON user_folders
+    WHEN NEW.deleted_at IS NULL AND (
+      NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id)
       OR (NEW.parent_id IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM user_folders
         WHERE id = NEW.parent_id AND user_id = NEW.user_id AND deleted_at IS NULL
       ))
+    )
     BEGIN
       SELECT RAISE(ABORT, 'invalid folder parent');
     END;
@@ -151,8 +153,8 @@ async function createIntegrityTriggers() {
     END;
 
     CREATE TRIGGER trg_folder_duplicate_update
-    BEFORE UPDATE OF parent_id, name, user_id ON user_folders
-    WHEN EXISTS (
+    BEFORE UPDATE OF parent_id, name, user_id, deleted_at ON user_folders
+    WHEN NEW.deleted_at IS NULL AND EXISTS (
       SELECT 1 FROM user_folders
       WHERE user_id = NEW.user_id AND parent_id IS NEW.parent_id
         AND name = NEW.name AND id != OLD.id AND deleted_at IS NULL

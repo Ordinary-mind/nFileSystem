@@ -555,14 +555,18 @@ test('回收站文件不能重新创建访问链接，恢复冲突会被拒绝',
     scopes: ['files:upload', 'files:read', 'files:delete', 'links:create'], createToken: true,
   } });
   const content = Buffer.from(`trash-link-${crypto.randomUUID()}`);
-  const uploaded = await upload(aliceToken, 'trash-link.bin', content);
+  const form = new FormData();
+  form.append('folderId', '');
+  form.append('files', new Blob([content], { type: 'application/octet-stream' }), 'trash-link.bin');
+  const uploaded = await api('/api/v1/files/upload', { method: 'POST', headers: { 'N-File-Token': created.data.token.token }, form });
   const fileId = uploaded.data.files[0].id;
-  assert.equal((await api(`/drive/file/${fileId}`, { method: 'DELETE', token: aliceToken })).response.status, 200);
+  assert.equal((await api(`/api/v1/files/${fileId}`, { method: 'DELETE', headers: { 'N-File-Token': created.data.token.token } })).response.status, 200);
   const link = await api(`/api/v1/files/${fileId}/access-links`, { method: 'POST', headers: { 'N-File-Token': created.data.token.token }, body: {} });
   assert.equal(link.response.status, 404);
-  const duplicate = await upload(aliceToken, 'trash-link-copy.bin', content);
-  assert.equal(duplicate.response.status, 200);
-  await dbModule.run('UPDATE user_files SET name = ? WHERE id = ?', ['trash-link.bin', duplicate.data.files[0].id]);
+  const trashedRecord = await dbModule.get('SELECT user_id, folder_id, file_id, name FROM user_files WHERE id = ?', [fileId]);
+  await dbModule.run('INSERT INTO user_files(user_id, folder_id, file_id, name) VALUES (?, ?, ?, ?)', [
+    trashedRecord.user_id, trashedRecord.folder_id, trashedRecord.file_id, trashedRecord.name,
+  ]);
   const trash = await api('/drive/trash', { token: aliceToken });
   const item = trash.data.items.find((entry) => entry.item_type === 'file' && entry.item_id === fileId);
   const restored = await api(`/drive/trash/${item.batch_id}/restore`, { method: 'POST', token: aliceToken });
