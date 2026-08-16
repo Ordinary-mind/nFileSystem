@@ -19,6 +19,7 @@ const paths = {
   edit: '<path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4"/>',
   move: '<path d="M5 7h6l2 2h6v10H5z"/><path d="m9 14 3-3 3 3m-3-3v6"/>',
   trash: '<path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/>',
+  restore: '<path d="M3 12a9 9 0 1 0 2.7-6.5L3 8"/><path d="M3 3v5h5"/>',
   eye: '<path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/>',
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
   logout: '<path d="M10 4H5v16h5m5-4 4-4-4-4m4 4H9"/>',

@@ -68,6 +68,11 @@
 .empty-drive p { margin: 7px 0 0; font-size: 13px; }
 .empty-drive .primary-button { margin-top: 18px; }
 
+/* 回收站 */
+.trash-row { grid-template-columns: minmax(0, 1fr) auto; }
+.trash-actions { display: flex; align-items: center; gap: 2px; padding-right: 6px; }
+.restore-button { color: var(--primary); }
+
 .upload-progress { padding: 10px 0 4px; }
 .progress-track { height: 8px; overflow: hidden; border-radius: 4px; background: #e8ecf3; }
 .progress-value { height: 100%; width: 0; background: var(--primary); transition: width 160ms linear; }

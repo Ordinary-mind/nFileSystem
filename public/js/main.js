@@ -37,8 +37,8 @@ export function startApp() {
         <section id="view-root" class="screen-content"></section>
         <nav class="bottom-nav" aria-label="主导航">
           <button class="nav-button ${route.section === 'files' ? 'active' : ''}" data-nav="files">${icon('files')}<span>文件</span></button>
-          <button class="nav-button ${route.section === 'trash' ? 'active' : ''}" data-nav="trash">${icon('trash')}<span>回收站</span></button>
           <button class="nav-button ${route.section === 'apps' ? 'active' : ''}" data-nav="apps">${icon('apps')}<span>应用</span></button>
+          <button class="nav-button ${route.section === 'trash' ? 'active' : ''}" data-nav="trash">${icon('trash')}<span>回收站</span></button>
           <button class="nav-button ${route.section === 'me' ? 'active' : ''}" data-nav="me">${icon('user')}<span>我的</span></button>
         </nav>
       </main>`;
