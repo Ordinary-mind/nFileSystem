@@ -14,6 +14,7 @@ const {
   get,
   all,
   transaction,
+  readTransaction,
   closeDb,
 } = require('./db');
 const {
@@ -30,8 +31,8 @@ const {
   verifyFileRecord,
   isDigest,
 } = require('./storage');
-const { hashPassword, comparePassword, signToken } = require('./utils/security');
-const { authRequired, apiTokenRequired, hashApiToken } = require('./middleware/auth');
+const { hashPassword, comparePassword, signToken, signDownloadToken } = require('./utils/security');
+const { authRequired, apiTokenRequired, downloadAuthRequired, hashApiToken } = require('./middleware/auth');
 const { initializeMailer } = require('./utils/mailer');
 const { getOrCreateThumbnail, removeThumbnail } = require('./thumbnail');
 const {
@@ -989,19 +990,25 @@ app.get('/api/v1/files', apiTokenRequired(['files:read']), async (req, res) => {
   try {
     const folderId = req.query.folderId || req.apiAuth.rootFolderId;
     const targetFolderId = await requireFolderInsideRoot(folderId, req.apiAuth.rootFolderId, req.apiAuth.userId);
+    const limit = req.query.limit === undefined ? DRIVE_PAGE_SIZE : parseRequiredId(req.query.limit, 'limit');
+    if (limit > 500) throw new HttpError(400, 'limit 不能超过 500');
+    const offset = req.query.offset === undefined ? 0 : Number(req.query.offset);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 10000000) throw new HttpError(400, 'offset 不合法');
     const files = await all(
       `SELECT uf.id, uf.name, uf.created_at, f.sha256, f.size, f.mime_type
        FROM user_files uf
        JOIN files f ON uf.file_id = f.id
        WHERE uf.user_id = ? AND uf.folder_id IS ? AND uf.deleted_at IS NULL
-       ORDER BY uf.id DESC`,
-      [req.apiAuth.userId, targetFolderId]
+        ORDER BY uf.id DESC LIMIT ? OFFSET ?`,
+      [req.apiAuth.userId, targetFolderId, limit + 1, offset]
     );
     const folders = await all(
-      'SELECT id, name, created_at FROM user_folders WHERE user_id = ? AND parent_id IS ? AND deleted_at IS NULL ORDER BY name',
-      [req.apiAuth.userId, targetFolderId]
+      'SELECT id, name, created_at FROM user_folders WHERE user_id = ? AND parent_id IS ? AND deleted_at IS NULL ORDER BY name LIMIT ? OFFSET ?',
+      [req.apiAuth.userId, targetFolderId, limit + 1, offset]
     );
-    return res.json({ rootFolderId: req.apiAuth.rootFolderId, folderId: targetFolderId, folders, files });
+    return res.json({ rootFolderId: req.apiAuth.rootFolderId, folderId: targetFolderId,
+      folders: folders.slice(0, limit), files: files.slice(0, limit),
+      page: { limit, offset, hasMore: folders.length > limit || files.length > limit } });
   } catch (err) {
     const status = err.status || 500;
     return res.status(status).json({ message: status === 403 ? '目标目录不在应用根目录内' : '获取应用文件失败', error: err.message });
@@ -1291,7 +1298,7 @@ app.get('/drive', authRequired, asyncRoute(async (req, res) => {
   const offset = req.query.offset === undefined ? 0 : Number(req.query.offset);
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > 10000000) throw new HttpError(400, 'offset 不合法');
 
-  const data = await transaction(async (tx) => {
+  const data = await readTransaction(async (tx) => {
     if (folderId !== null) await assertFolder(tx, folderId, req.user.id);
     const escapedSearch = search.replace(/[\\%_]/g, (char) => `\\${char}`);
     const searchPattern = `%${escapedSearch}%`;
@@ -1373,7 +1380,7 @@ app.get('/drive/search', authRequired, asyncRoute(async (req, res) => {
   if (limit > 100) throw new HttpError(400, 'limit 不能超过 100');
   const cursor = decodeSearchCursor(req.query.cursor);
 
-  const results = await transaction(async (tx) => {
+  const results = await readTransaction(async (tx) => {
     if (scope === 'current' && folderId !== null) await assertFolder(tx, folderId, req.user.id);
     const conditions = ['ds.user_id = ?'];
     const params = [req.user.id];
@@ -1394,24 +1401,30 @@ app.get('/drive/search', authRequired, asyncRoute(async (req, res) => {
     }
     params.push(limit + 1);
     return tx.all(`
-      WITH RECURSIVE folder_paths(id, path) AS (
-        SELECT id, '/' || name FROM user_folders WHERE user_id = ? AND parent_id IS NULL
+      WITH RECURSIVE matches AS MATERIALIZED (
+        SELECT ds.entity_id, ds.entity_type, ds.name, ds.parent_id
+        FROM drive_search ds
+        WHERE ${conditions.join(' AND ')}
+        ORDER BY lower(ds.name), ds.entity_type, ds.entity_id
+        LIMIT ?
+      ), ancestors(entity_type, entity_id, folder_id, path, depth) AS (
+        SELECT entity_type, entity_id, parent_id, '', 0 FROM matches
         UNION ALL
-        SELECT f.id, fp.path || '/' || f.name
-        FROM user_folders f JOIN folder_paths fp ON f.parent_id = fp.id
-        WHERE f.user_id = ?
+        SELECT a.entity_type, a.entity_id, fo.parent_id, '/' || fo.name || a.path, a.depth + 1
+        FROM ancestors a JOIN user_folders fo ON fo.id = a.folder_id AND fo.user_id = ?
+        WHERE a.depth < ?
       )
-      SELECT CAST(ds.entity_id AS INTEGER) AS id, ds.entity_type AS type, ds.name, lower(ds.name) AS name_key,
-             CAST(ds.parent_id AS INTEGER) AS folder_id, COALESCE(fp.path, '/') AS path,
+      SELECT CAST(m.entity_id AS INTEGER) AS id, m.entity_type AS type, m.name, lower(m.name) AS name_key,
+             CAST(m.parent_id AS INTEGER) AS folder_id,
+             COALESCE((SELECT NULLIF(a.path, '') FROM ancestors a
+               WHERE a.entity_type = m.entity_type AND a.entity_id = m.entity_id AND a.folder_id IS NULL
+               ORDER BY a.depth DESC LIMIT 1), '/') AS path,
              f.sha256, f.size, f.mime_type
-      FROM drive_search ds
-      LEFT JOIN user_files uf ON ds.entity_type = 'file' AND uf.id = ds.entity_id
+      FROM matches m
+      LEFT JOIN user_files uf ON m.entity_type = 'file' AND uf.id = m.entity_id
       LEFT JOIN files f ON uf.file_id = f.id
-      LEFT JOIN folder_paths fp ON fp.id = ds.parent_id
-      WHERE ${conditions.join(' AND ')}
-      ORDER BY lower(ds.name), ds.entity_type, ds.entity_id
-      LIMIT ?
-    `, [req.user.id, req.user.id, ...params]);
+      ORDER BY lower(m.name), m.entity_type, m.entity_id
+    `, [...params, req.user.id, MAX_FOLDER_DEPTH]);
   });
   const pageRows = results.slice(0, limit);
   res.json({
@@ -1687,7 +1700,25 @@ app.post('/drive/move', authRequired, asyncRoute(async (req, res) => {
   res.json({ message: '移动成功' });
 }));
 
-app.get('/files/:sha256/download', authRequired, asyncRoute(async (req, res, next) => {
+app.post('/files/:sha256/download-ticket', authRequired, asyncRoute(async (req, res) => {
+  const sha256 = String(req.params.sha256 || '').toLowerCase();
+  if (!isDigest(sha256, 64)) throw new HttpError(400, 'sha256 不合法');
+  const owned = await get(`SELECT 1 AS owned FROM user_files uf JOIN files f ON f.id = uf.file_id
+    WHERE f.sha256 = ? AND uf.user_id = ? AND uf.deleted_at IS NULL LIMIT 1`, [sha256, req.user.id]);
+  if (!owned) throw new HttpError(404, '文件不存在');
+  const downloadPath = `/files/${sha256}/download`;
+  const ticket = signDownloadToken({ id: req.user.id, credentialVersion: req.user.credentialVersion, sha256 });
+  res.cookie('nfs_download', ticket, {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: req.secure,
+    path: downloadPath,
+    maxAge: 5 * 60 * 1000,
+  });
+  res.json({ path: downloadPath });
+}));
+
+app.get('/files/:sha256/download', downloadAuthRequired, asyncRoute(async (req, res, next) => {
   const sha256 = String(req.params.sha256 || '').toLowerCase();
   if (!isDigest(sha256, 64)) throw new HttpError(400, 'sha256 不合法');
   const record = await get(`

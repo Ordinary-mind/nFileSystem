@@ -18,7 +18,7 @@
 
 持久化目录应放在可靠的本地块存储或本机文件系统上，不要直接放在无法保证 SQLite 文件锁、原子重命名和目录同步语义的网络文件系统上。
 
-这是 SHA-256 基线版本，不提供旧数据库、MD5 API 或旧物理路径迁移。启动时若检测到非当前 schema，会拒绝运行；部署前应使用空的 `data/` 和 `uploads/`。
+这是 SHA-256 基线版本，不提供旧 MD5 数据库、API 或物理路径迁移。启动时会接受当前 SHA-256 基线的 v1/v2 数据库，并将 v1 升级到 v2；其他数据库结构会被拒绝。全新部署应使用空的 `data/` 和 `uploads/`。
 
 ## 快速开始
 
@@ -29,7 +29,7 @@ npm ci
 cp .env.example .env
 ```
 
-在 `.env` 中配置至少 32 字节、彼此不同的 `JWT_SECRET` 和 `AUTH_CODE_SECRET`，并设置 SMTP 发件信息，然后启动：
+在 `.env` 中配置至少 32 字节、彼此不同的 `JWT_SECRET` 和 `AUTH_CODE_SECRET`，然后启动。生产环境还需配置 SMTP 发件信息；开发环境未配置 SMTP 时，验证码会输出到服务控制台。
 
 ```bash
 npm start
@@ -37,11 +37,13 @@ npm start
 
 默认地址为 `http://localhost:6001`。开发模式使用 `npm run dev`。
 
+新安装时，先在 `.env` 中将 `ALLOW_REGISTER` 临时设为 `true`，启动后注册首个账号；注册完成再设回 `false` 并重启。模板默认关闭注册，系统不会自动创建账号。
+
 ## 配置
 
-完整模板见 `.env.example`，主要配置如下：
+完整模板见 `.env.example`，下表列出模板值（复制模板后生效）：
 
-| 变量 | 说明 | 默认值 |
+| 变量 | 说明 | 模板值 |
 |------|------|--------|
 | `PORT` | HTTP 端口 | `6001` |
 | `JWT_SECRET` | JWT 签名密钥，至少 32 字节 | 必填 |
@@ -66,6 +68,8 @@ npm start
 | `TRASH_RETENTION_DAYS` | 回收站保留天数 | `7` |
 
 `.env` 不应提交到仓库。
+
+若不复制模板，程序内置端口为 `3000`；未设置 `TOKEN_EXPIRES_IN` 时，生产环境登录 Token 有效期为 `2h`，其他环境为 `7d`。
 
 ## Docker
 
@@ -92,6 +96,8 @@ docker compose ps
 
 服务端使用已经加载的 `n-file-system:latest` 镜像，不需要再次构建。更新版本时，在构建机重新执行 `npm run build:docker`，替换服务端 tar 包后再次执行 `docker load -i n-file-system.tar` 和 `docker compose up -d`。首次部署前请确认服务端 Docker Compose 可用，并确保服务端与构建机使用兼容的 CPU 架构。
 
+用于正式部署的 `.env` 应设置 `NODE_ENV=production` 并配置可用的 SMTP；`.env.example` 中的 `development` 会通过 Compose 的 `env_file` 覆盖镜像内的生产环境设置。
+
 镜像通过入口脚本初始化 `/app/data` 和 `/app/uploads` 的权限，然后以 `node` 用户运行。两个目录必须同时持久化。
 
 ## SHA-256 存储模型
@@ -102,7 +108,7 @@ docker compose ps
 uploads/<sha256前2位>/<sha256第3-4位>/<完整sha256>
 ```
 
-上传时先完整写入并同步物理文件，再提交数据库事务；删除时先删除引用，再回收没有引用的物理文件。异常中断最多留下可检测、可清理的孤儿文件，不会提交指向未落盘内容的新记录。
+上传时先完整写入并同步物理文件，再提交数据库事务；永久删除或回收站记录到期后，才会回收没有引用的物理文件。异常中断最多留下可检测、可清理的孤儿文件，不会提交指向未落盘内容的新记录。
 
 ## 回收站
 
@@ -114,7 +120,7 @@ uploads/<sha256前2位>/<sha256第3-4位>/<完整sha256>
 
 ## 用户 API
 
-需要登录的接口使用 `Authorization: Bearer <login-jwt>`。
+健康检查、注册状态、邮箱验证码、注册、登录和密码重置接口无需登录；其他用户接口使用 `Authorization: Bearer <login-jwt>`。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -127,16 +133,23 @@ uploads/<sha256前2位>/<sha256第3-4位>/<完整sha256>
 | POST | `/auth/password/change` | 修改密码 |
 | GET | `/drive` | 目录列表，支持 `folderId`、`name`、`limit`、`offset` |
 | GET | `/drive/search` | 全局或当前目录搜索 |
+| GET | `/drive/trash` | 查看回收站 |
+| POST | `/drive/trash/:batchId/restore` | 恢复回收站项目 |
+| DELETE | `/drive/trash/:batchId` | 永久删除回收站项目 |
+| DELETE | `/drive/trash` | 清空回收站 |
 | POST | `/drive/folder` | 创建文件夹 |
 | PUT | `/drive/folder/:id` | 重命名文件夹 |
-| DELETE | `/drive/folder/:id` | 递归删除文件夹 |
+| DELETE | `/drive/folder/:id` | 将文件夹及内容移入回收站 |
 | PUT | `/drive/file/:id` | 重命名文件 |
 | DELETE | `/drive/file/:id` | 删除文件引用 |
 | POST | `/drive/move` | 移动文件或文件夹 |
 | POST | `/files/upload` | multipart 批量上传，字段名 `files` |
 | POST | `/files/instant` | 按 SHA-256 尝试当前账号内秒传 |
-| GET | `/files/:sha256/download` | 下载文件 |
+| POST | `/files/:sha256/download-ticket` | 为浏览器原生下载签发 5 分钟有效的 HttpOnly 下载 Cookie |
+| GET | `/files/:sha256/download` | 使用登录 JWT 或下载 Cookie 下载文件，支持 HTTP Range |
 | GET | `/files/:sha256/thumbnail` | 获取图片缩略图 |
+
+浏览器原生下载先携带登录 JWT 调用 `POST /files/:sha256/download-ticket`，服务端会设置仅适用于该文件下载路径、有效期 5 分钟的 HttpOnly Cookie，并返回 `path`；随后直接访问返回的路径即可下载，文件内容不会先进入页面内存。已有的 Bearer JWT 下载方式仍可使用。
 
 秒传请求示例：
 
@@ -167,6 +180,12 @@ N-File-Token: <api-token>
 | POST | `/api/v1/files/upload` | `files:upload` |
 | POST | `/api/v1/files/:id/access-links` | `links:create` |
 | DELETE | `/api/v1/files/:id` | `files:delete` |
+| GET | `/api/v1/trash` | `files:read` |
+| POST | `/api/v1/trash/:batchId/restore` | `files:upload` |
+| DELETE | `/api/v1/trash/:batchId` | `files:delete` |
+| DELETE | `/api/v1/trash` | `files:delete` |
+
+`GET /api/v1/files` 支持 `folderId`、`limit`、`offset`。默认每类返回 `DRIVE_PAGE_SIZE` 项（模板为 200），`limit` 最大 500；响应的 `folders` 和 `files` 分别按相同的 `offset` 分页，并通过 `page.hasMore` 表示是否还有下一页。
 
 应用 Token 只能访问绑定根目录及其子目录。访问链接只通过以下路径公开读取：
 

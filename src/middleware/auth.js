@@ -1,4 +1,4 @@
-const { verifyToken } = require('../utils/security');
+const { verifyToken, verifyDownloadToken } = require('../utils/security');
 const { get, run } = require('../db');
 const crypto = require('crypto');
 
@@ -112,8 +112,29 @@ function apiTokenRequired(requiredScopes = []) {
   };
 }
 
+async function downloadAuthRequired(req, res, next) {
+  if (req.headers.authorization) return authRequired(req, res, next);
+  try {
+    const cookie = String(req.headers.cookie || '').split(';').map((part) => part.trim())
+      .find((part) => part.startsWith('nfs_download='));
+    if (!cookie) throw new Error('missing download ticket');
+    const payload = verifyDownloadToken(cookie.slice('nfs_download='.length));
+    if (!Number.isSafeInteger(payload.id) || !Number.isSafeInteger(payload.credentialVersion)
+      || payload.sha256 !== String(req.params.sha256 || '').toLowerCase()) {
+      throw new Error('invalid download ticket');
+    }
+    const user = await get('SELECT id, credential_version FROM users WHERE id = ?', [payload.id]);
+    if (!user || user.credential_version !== payload.credentialVersion) throw new Error('expired login');
+    req.user = { id: user.id };
+    return next();
+  } catch {
+    return res.status(401).json({ message: '下载授权已过期，请重新下载' });
+  }
+}
+
 module.exports = {
   authRequired,
   apiTokenRequired,
+  downloadAuthRequired,
   hashApiToken,
 };

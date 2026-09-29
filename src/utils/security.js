@@ -44,9 +44,19 @@ function verifyToken(token) {
   return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
 }
 
+function signDownloadToken(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '5m', algorithm: 'HS256', audience: 'file-download' });
+}
+
+function verifyDownloadToken(token) {
+  return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'], audience: 'file-download' });
+}
+
 module.exports = {
   hashPassword,
   comparePassword,
   signToken,
   verifyToken,
+  signDownloadToken,
+  verifyDownloadToken,
 };

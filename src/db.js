@@ -12,12 +12,25 @@ const dbPath = path.join(dataDir, 'app.db');
 const db = new sqlite3.Database(dbPath);
 const busyTimeout = Number.parseInt(process.env.SQLITE_BUSY_TIMEOUT_MS || '5000', 10);
 db.configure('busyTimeout', Number.isFinite(busyTimeout) ? busyTimeout : 5000);
+const readers = Array.from({ length: 2 }, () => {
+  const connection = new sqlite3.Database(dbPath);
+  connection.configure('busyTimeout', Number.isFinite(busyTimeout) ? busyTimeout : 5000);
+  return { connection, queue: Promise.resolve(), pending: 0 };
+});
 
 let operationQueue = Promise.resolve();
 
 function enqueue(operation) {
   const result = operationQueue.then(operation);
   operationQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function enqueueRead(operation) {
+  const reader = readers.reduce((best, current) => current.pending < best.pending ? current : best);
+  reader.pending++;
+  const result = reader.queue.then(() => operation(reader.connection));
+  reader.queue = result.then(() => { reader.pending--; }, () => { reader.pending--; });
   return result;
 }
 
@@ -31,8 +44,12 @@ function rawRun(sql, params = []) {
 }
 
 function rawGet(sql, params = []) {
+  return queryGet(db, sql, params);
+}
+
+function queryGet(connection, sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
+    connection.get(sql, params, (err, row) => {
       if (err) return reject(err);
       return resolve(row);
     });
@@ -40,8 +57,12 @@ function rawGet(sql, params = []) {
 }
 
 function rawAll(sql, params = []) {
+  return queryAll(db, sql, params);
+}
+
+function queryAll(connection, sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
+    connection.all(sql, params, (err, rows) => {
       if (err) return reject(err);
       return resolve(rows);
     });
@@ -62,11 +83,33 @@ function run(sql, params = []) {
 }
 
 function get(sql, params = []) {
-  return enqueue(() => rawGet(sql, params));
+  return enqueueRead((connection) => queryGet(connection, sql, params));
 }
 
 function all(sql, params = []) {
-  return enqueue(() => rawAll(sql, params));
+  return enqueueRead((connection) => queryAll(connection, sql, params));
+}
+
+function readTransaction(work) {
+  return enqueueRead(async (connection) => {
+    await queryRun(connection, 'BEGIN');
+    const tx = {
+      get: (sql, params) => queryGet(connection, sql, params),
+      all: (sql, params) => queryAll(connection, sql, params),
+    };
+    try {
+      const result = await work(tx);
+      await queryRun(connection, 'COMMIT');
+      return result;
+    } catch (err) {
+      await queryRun(connection, 'ROLLBACK');
+      throw err;
+    }
+  });
+}
+
+function queryRun(connection, sql) {
+  return new Promise((resolve, reject) => connection.run(sql, (err) => err ? reject(err) : resolve()));
 }
 
 function transaction(work) {
@@ -264,7 +307,8 @@ async function createSearchIndex() {
   `);
 
   const counts = await rawGet(`
-    SELECT (SELECT COUNT(*) FROM user_folders) + (SELECT COUNT(*) FROM user_files) AS source_count,
+    SELECT (SELECT COUNT(*) FROM user_folders WHERE deleted_at IS NULL)
+         + (SELECT COUNT(*) FROM user_files WHERE deleted_at IS NULL) AS source_count,
            (SELECT COUNT(*) FROM drive_search) AS index_count
   `);
   if (counts.source_count !== counts.index_count) {
@@ -483,7 +527,11 @@ async function initDb() {
   });
 }
 
-function closeDb() {
+async function closeDb() {
+  await Promise.all(readers.map(async (reader) => {
+    await reader.queue;
+    await new Promise((resolve, reject) => reader.connection.close((err) => err ? reject(err) : resolve()));
+  }));
   return enqueue(() => new Promise((resolve, reject) => {
     db.close((err) => {
       if (err) return reject(err);
@@ -497,6 +545,7 @@ module.exports = {
   get,
   all,
   transaction,
+  readTransaction,
   initDb,
   closeDb,
   db,

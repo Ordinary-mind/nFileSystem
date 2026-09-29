@@ -349,13 +349,13 @@ export function mountDrive(root, folderId, navigate, route = {}) {
 
   async function downloadFile(item) {
     try {
-      const blob = await requestBlob(`/files/${item.sha256}/download?name=${encodeURIComponent(item.name)}`);
-      const url = URL.createObjectURL(blob);
+      const { path } = await request(`/files/${item.sha256}/download-ticket`, { method: 'POST' });
       const link = document.createElement('a');
-      link.href = url;
+      link.href = `${path}?name=${encodeURIComponent(item.name)}`;
       link.download = item.name;
+      document.body.appendChild(link);
       link.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      link.remove();
     } catch (error) { showToast(error.message, 'error'); }
   }
 

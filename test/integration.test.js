@@ -290,6 +290,24 @@ test('正常上传取得的共享内容不会被其他用户删除操作误回�
   assert.deepEqual(bobDownload.data, content);
 });
 
+test('浏览器下载票据仅允许当前用户下载指定文件，并支持 Range', async () => {
+  const content = Buffer.from('browser direct download content');
+  const uploaded = await upload(bobToken, 'browser.txt', content);
+  const sha256 = uploaded.data.files[0].sha256;
+  const ticket = await api(`/files/${sha256}/download-ticket`, { method: 'POST', token: bobToken });
+  assert.equal(ticket.response.status, 200);
+  assert.equal(ticket.data.path, `/files/${sha256}/download`);
+  const cookie = ticket.response.headers.get('set-cookie').split(';')[0];
+  assert.match(ticket.response.headers.get('set-cookie'), /HttpOnly/);
+  const downloaded = await api(ticket.data.path, { headers: { Cookie: cookie, Range: 'bytes=0-6' } });
+  assert.equal(downloaded.response.status, 206);
+  assert.deepEqual(downloaded.data, content.subarray(0, 7));
+  const denied = await api(`/files/${crypto.createHash('sha256').update('other').digest('hex')}/download`, { headers: { Cookie: cookie } });
+  assert.equal(denied.response.status, 401);
+  const foreign = await api(`/files/${sha256}/download-ticket`, { method: 'POST', token: aliceToken });
+  assert.equal(foreign.response.status, 404);
+});
+
 test('全局搜索返回完整路径、隔离用户并同步重命名', async () => {
   const parentId = await createFolder(aliceToken, '搜索资料');
   const childId = await createFolder(aliceToken, '项目报告', parentId);
@@ -416,6 +434,19 @@ test('接入应用可通过独立 Token 隔离上传并创建访问链接', asyn
   assert.equal(uploaded.response.status, 200);
   assert.equal(uploaded.data.files.length, 1);
   assert.match(uploaded.data.files[0].accessLink.path, /^\/n_file_system_api\/access\//);
+
+  for (const name of ['one', 'two']) {
+    const createdFolder = await api('/api/v1/folders', {
+      method: 'POST', headers: { 'N-File-Token': created.data.token.token }, body: { name },
+    });
+    assert.equal(createdFolder.response.status, 200);
+  }
+  const firstPage = await api('/api/v1/files?limit=1', { headers: { 'N-File-Token': created.data.token.token } });
+  const nextPage = await api('/api/v1/files?limit=1&offset=1', { headers: { 'N-File-Token': created.data.token.token } });
+  assert.equal(firstPage.data.page.hasMore, true);
+  assert.equal(firstPage.data.folders.length, 1);
+  assert.equal(nextPage.data.folders.length, 1);
+  assert.notEqual(firstPage.data.folders[0].id, nextPage.data.folders[0].id);
 
   const accessed = await api(uploaded.data.files[0].accessLink.path);
   assert.equal(accessed.response.status, 200);
@@ -591,6 +622,29 @@ test('目录列表支持稳定分页', async () => {
   assert.equal(first.data.page.hasMore, true);
   assert.equal(second.data.folders.length, 5);
   assert.equal(second.data.page.hasMore, false);
+});
+
+test('写事务执行期间只读查询仍可完成', async () => {
+  let releaseWrite;
+  let markWriteStarted;
+  const writeStarted = new Promise((resolve) => { markWriteStarted = resolve; });
+  const holdWrite = new Promise((resolve) => { releaseWrite = resolve; });
+  const writer = dbModule.transaction(async (tx) => {
+    await tx.run('UPDATE users SET name = name WHERE id = 1');
+    markWriteStarted();
+    await holdWrite;
+  });
+  await writeStarted;
+  try {
+    const result = await Promise.race([
+      dbModule.get('SELECT 1 AS ok'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('只读查询被写事务阻塞')), 1000)),
+    ]);
+    assert.equal(result.ok, 1);
+  } finally {
+    releaseWrite();
+    await writer;
+  }
 });
 
 test('关闭注册时禁止注册验证码但保留密码找回入口', async () => {
