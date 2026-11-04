@@ -3,6 +3,7 @@ import { fileIconName, icon } from '../core/icons.js';
 import { escapeHtml, formatDate, formatSize, getExtension, hasPressMoved, selectionKey } from '../core/utils.js';
 import { confirmDialog, errorView, loadingView, openActionSheet, openOverlay, promptText, showToast } from '../core/ui.js';
 import { uploadFiles } from '../features/upload.js';
+import { mountDragAndDrop } from '../features/dnd.js';
 import { mountImageViewer } from '../features/image-viewer.js';
 
 const TEXT_EXTENSIONS = new Set(['txt', 'md', 'json', 'js', 'ts', 'css', 'html', 'xml', 'yml', 'yaml', 'conf', 'ini', 'sh', 'bat', 'log', 'csv', 'env']);
@@ -43,6 +44,7 @@ export function mountDrive(root, folderId, navigate, route = {}) {
     </div>
     <div class="breadcrumb-strip" data-breadcrumb></div>
     <div class="drive-list" data-list>${loadingView()}</div>
+    <div class="drop-hint hidden" data-drop-hint aria-hidden="true">${icon('upload')}<strong>松开以上传文件</strong><span>文件将上传到当前目录</span></div>
     <button type="button" class="fab" data-create aria-label="新建或上传">${icon('plus')}</button>
     <input type="file" multiple class="hidden" data-file-input>`;
 
@@ -117,7 +119,7 @@ export function mountDrive(root, folderId, navigate, route = {}) {
     const thumbnail = !isFolder && /^image\/(jpeg|png|webp|gif|avif)$/i.test(item.mime_type || '')
       ? ` data-thumbnail="${escapeHtml(item.sha256)}"` : '';
     return `
-      <article class="drive-row ${selected.has(selectionKey(item)) ? 'selected' : ''}" data-type="${item.type}" data-id="${item.id}" data-name="${escapeHtml(item.name)}" data-sha256="${escapeHtml(item.sha256 || '')}" data-mime-type="${escapeHtml(item.mime_type || '')}">
+      <article class="drive-row ${selected.has(selectionKey(item)) ? 'selected' : ''}" draggable="true" data-type="${item.type}" data-id="${item.id}" data-name="${escapeHtml(item.name)}" data-sha256="${escapeHtml(item.sha256 || '')}" data-mime-type="${escapeHtml(item.mime_type || '')}">
         <button type="button" class="drive-main" data-open>
           <span class="file-symbol ${isFolder ? 'folder-symbol' : ''}"${thumbnail}>${icon(isFolder ? 'folder' : fileIconName(item.name))}</span>
           <span class="drive-text"><strong>${escapeHtml(item.name)}</strong><small>${meta}</small></span>
@@ -419,6 +421,18 @@ export function mountDrive(root, folderId, navigate, route = {}) {
     openActionSheet(item.name, actions);
   }
 
+  async function moveItemTo(item, targetFolderId, targetName) {
+    try {
+      await request('/drive/move', { method: 'POST', body: { type: item.type, id: item.id, targetFolderId } });
+      showToast(`已移动到${targetName || '根目录'}`);
+      load();
+      return true;
+    } catch (error) {
+      showToast(error.message, 'error');
+      return false;
+    }
+  }
+
   function openMove(item) {
     let targetFolderId = null;
     let targetPath = '根目录';
@@ -429,15 +443,8 @@ export function mountDrive(root, folderId, navigate, route = {}) {
         if (!folderLoaded) return;
         const submitButton = panel.overlay.querySelector('[data-submit]');
         submitButton.disabled = true;
-        try {
-          await request('/drive/move', { method: 'POST', body: { type: item.type, id: item.id, targetFolderId } });
-          close();
-          showToast(`已移动到${targetPath}`);
-          load();
-        } catch (error) {
-          showToast(error.message, 'error');
-          submitButton.disabled = !folderLoaded;
-        }
+        if (await moveItemTo(item, targetFolderId, targetPath)) close();
+        else submitButton.disabled = !folderLoaded;
       },
     });
     const moveList = panel.overlay.querySelector('[data-move-list]');
@@ -584,4 +591,19 @@ export function mountDrive(root, folderId, navigate, route = {}) {
     // 缓存只负责立即恢复界面，随后静默校准移动、重命名等最新变更。
     if (!search) load(false, true);
   } else load();
+
+  list.addEventListener('dragstart', () => {
+    window.clearTimeout(longPressTimer);
+    longPressTimer = null;
+    longPressRow = null;
+    longPressStart = null;
+    if (!search && !selected.size) suppressClickUntil = Date.now() + 700;
+  });
+  mountDragAndDrop({
+    root,
+    list,
+    onUpload: handleFiles,
+    onMove: moveItemTo,
+    isInternalEnabled: () => !search && !selected.size,
+  });
 }

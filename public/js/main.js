@@ -1,4 +1,5 @@
 import { setUnauthorizedHandler } from './core/api.js';
+import { hasFileDrag } from './core/dnd-utils.js';
 import { clearSession, getSession, saveSession } from './core/session.js';
 import { icon } from './core/icons.js';
 import { parseRoute } from './core/utils.js';
@@ -17,6 +18,12 @@ function navigate(path, replace = false) {
 
 export function startApp() {
   const app = document.getElementById('app');
+
+  const preventFileNavigation = (event) => {
+    if (hasFileDrag(event.dataTransfer?.types)) event.preventDefault();
+  };
+  document.addEventListener('dragover', preventFileNavigation);
+  document.addEventListener('drop', preventFileNavigation);
 
   const logout = async (confirm = false) => {
     if (confirm) {

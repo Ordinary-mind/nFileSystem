@@ -89,3 +89,65 @@ test('普通目录命中历史缓存后仍会静默刷新最新列表', () => {
   assert.match(driveSource, /load\(false, true\)/);
   assert.match(driveSource, /缓存只负责立即恢复界面/);
 });
+
+async function loadDndUtils() {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'core', 'dnd-utils.js'), 'utf8');
+  return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+}
+
+test('拖放类型判定只把外部文件拖拽视为上传', async () => {
+  const { hasFileDrag } = await loadDndUtils();
+  assert.equal(hasFileDrag(['Files']), true);
+  assert.equal(hasFileDrag(['files']), true);
+  assert.equal(hasFileDrag({ contains: (type) => type === 'Files' }), true);
+  assert.equal(hasFileDrag({ length: 1, 0: 'Files' }), true);
+  assert.equal(hasFileDrag(['text/plain']), false);
+  assert.equal(hasFileDrag(null), false);
+});
+
+test('拖放内容忽略文件夹并保留可上传文件', async () => {
+  const { extractDroppedFiles } = await loadDndUtils();
+  const a = { name: 'a.txt' };
+  const b = { name: 'b.png' };
+  const item = (file, isDirectory = false) => ({
+    kind: 'file',
+    getAsFile: () => file,
+    webkitGetAsEntry: () => (isDirectory ? { isDirectory: true } : { isFile: true }),
+  });
+  assert.deepEqual(extractDroppedFiles({ items: [item(a), item(b)], files: [a, b] }), { files: [a, b], ignoredFolders: 0 });
+  assert.deepEqual(extractDroppedFiles({ items: [item(a), item({}, true)], files: [a] }), { files: [a], ignoredFolders: 1 });
+  assert.deepEqual(extractDroppedFiles({ items: [item({}, true)], files: [] }), { files: [], ignoredFolders: 1 });
+  assert.deepEqual(extractDroppedFiles({ items: [], files: [a] }), { files: [a], ignoredFolders: 0 });
+  assert.deepEqual(extractDroppedFiles({ files: [a, b] }), { files: [a, b], ignoredFolders: 0 });
+  assert.deepEqual(
+    extractDroppedFiles({ items: [{ kind: 'file', getAsFile: () => null, webkitGetAsEntry: () => null }], files: [a] }),
+    { files: [a], ignoredFolders: 0 }
+  );
+  assert.deepEqual(extractDroppedFiles(null), { files: [], ignoredFolders: 0 });
+});
+
+test('拖拽移动只接受合法的文件夹目标', async () => {
+  const { isDropTargetValid } = await loadDndUtils();
+  assert.equal(isDropTargetValid({ type: 'file', id: 7 }, { type: 'folder', id: 3 }), true);
+  assert.equal(isDropTargetValid({ type: 'folder', id: 2 }, { type: 'folder', id: 3 }), true);
+  assert.equal(isDropTargetValid({ type: 'folder', id: 3 }, { type: 'folder', id: '3' }), false);
+  assert.equal(isDropTargetValid({ type: 'file', id: 3 }, { type: 'folder', id: 3 }), true);
+  assert.equal(isDropTargetValid({ type: 'file', id: 1 }, { type: 'file', id: 2 }), false);
+  assert.equal(isDropTargetValid(null, { type: 'folder', id: 3 }), false);
+  assert.equal(isDropTargetValid({ type: 'file', id: 1 }, null), false);
+});
+
+test('文件视图接入拖拽上传与拖拽移动并保持原有入口', () => {
+  const driveSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'drive.js'), 'utf8');
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'main.js'), 'utf8');
+  assert.match(driveSource, /draggable="true"/);
+  assert.match(driveSource, /data-drop-hint/);
+  assert.match(driveSource, /mountDragAndDrop\(\{/);
+  assert.match(driveSource, /onUpload: handleFiles/);
+  assert.match(driveSource, /onMove: moveItemTo/);
+  assert.match(driveSource, /isInternalEnabled: \(\) => !search && !selected\.size/);
+  assert.match(driveSource, /await request\('\/drive\/move'/);
+  assert.match(driveSource, /fileInput\.addEventListener\('change'/);
+  assert.match(mainSource, /document\.addEventListener\('dragover'/);
+  assert.match(mainSource, /document\.addEventListener\('drop'/);
+});
