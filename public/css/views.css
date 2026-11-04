@@ -190,3 +190,46 @@
 .settings-row small { color: var(--muted); font-size: 11px; }
 .danger-row { color: var(--danger); }
 .danger-row .settings-icon, .danger-row small { color: var(--danger); }
+
+/* 分享：创建弹层与管理列表 */
+.share-expiry { grid-template-columns: repeat(4, 1fr); margin-bottom: 16px; }
+.share-expiry .segment { height: 38px; font-size: 13px; }
+.share-result { display: grid; gap: 12px; }
+.share-manage-list { display: grid; }
+.share-manage-row { padding: 12px 14px; border-bottom: 1px solid var(--line); display: grid; gap: 10px; }
+.share-manage-row:last-child { border-bottom: 0; }
+.share-manage-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.share-manage-main .drive-text { flex: 1; }
+.share-manage-actions { display: flex; gap: 8px; }
+.share-manage-actions .secondary-button { min-height: 36px; padding: 0 14px; font-size: 13px; }
+.share-manage-actions .danger-row { border-color: var(--danger-soft); }
+.share-badge { flex: 0 0 auto; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.share-badge.active { color: var(--primary); background: var(--primary-soft); }
+.share-badge.muted { color: var(--muted); background: #eef1f5; }
+.share-badge.danger { color: var(--danger); background: var(--danger-soft); }
+.share-state { min-height: 220px; padding: 40px 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; color: var(--muted); }
+.share-state .icon { width: 42px; height: 42px; color: #8b96a8; }
+.share-state h2 { margin: 0; color: #344054; font-size: 17px; }
+.share-state p { margin: 0; font-size: 13px; }
+
+/* 分享：访客公开页 */
+.share-screen { min-height: 100vh; min-height: 100dvh; background: var(--bg); padding-bottom: calc(28px + env(safe-area-inset-bottom)); }
+.share-topbar { min-height: 56px; padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.share-brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; }
+.share-brand .icon { width: 20px; height: 20px; color: var(--primary); }
+.share-expiry-tag, .share-topbar .share-expiry { color: var(--muted); font-size: 12px; }
+.share-passcode { width: min(100%, 340px); margin: 12vh auto 0; padding: 26px 22px; display: grid; gap: 14px; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); text-align: center; }
+.share-passcode h2 { margin: 0; font-size: 18px; }
+.share-passcode p { margin: 0; color: var(--muted); font-size: 13px; }
+.share-passcode .form-message { margin: 0; }
+.share-file-card { width: min(100%, 420px); margin: 36px auto 0; padding: 24px 20px; display: grid; gap: 10px; justify-items: center; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); text-align: center; }
+.share-file-card h2 { margin: 4px 0 0; font-size: 17px; overflow-wrap: anywhere; }
+.share-file-card p { margin: 0; color: var(--muted); font-size: 13px; }
+.share-actions { display: flex; gap: 10px; margin-top: 10px; }
+.share-actions .primary-button, .share-actions .secondary-button { min-height: 44px; }
+.share-file-symbol { width: 72px; height: 72px; border-radius: 14px; background: #f1f4f9; color: #60708a; display: flex; align-items: center; justify-content: center; }
+.share-file-symbol .icon { width: 34px; height: 34px; }
+.share-image { max-width: 100%; max-height: 46vh; border-radius: 10px; object-fit: contain; cursor: zoom-in; }
+.share-breadcrumb { padding-left: 6px; }
+.share-list { margin: 4px 0 0; background: var(--surface); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.share-thumb { width: 100%; height: 100%; display: block; object-fit: cover; }

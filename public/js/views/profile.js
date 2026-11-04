@@ -1,7 +1,106 @@
 import { request } from '../core/api.js';
 import { icon } from '../core/icons.js';
-import { escapeHtml } from '../core/utils.js';
-import { openOverlay } from '../core/ui.js';
+import { escapeHtml, formatDate, formatSize } from '../core/utils.js';
+import { confirmDialog, copyText, errorView, loadingView, openOverlay, showToast } from '../core/ui.js';
+
+const SHARE_STATUS = {
+  active: { label: '生效中', className: 'share-badge active' },
+  expired: { label: '已过期', className: 'share-badge muted' },
+  revoked: { label: '已撤销', className: 'share-badge danger' },
+  gone: { label: '已失效', className: 'share-badge muted' },
+};
+
+function showResetLink(path) {
+  const panel = openOverlay({
+    title: '新链接已生成',
+    content: `
+      <div class="share-result">
+        <p class="field-hint">旧链接已失效，请立即复制保存新链接（仅展示一次）：</p>
+        <input class="text-field" data-share-url readonly aria-label="分享链接">
+        <button type="button" class="primary-button" data-copy>复制链接</button>
+      </div>`,
+  });
+  const url = `${window.location.origin}${path}`;
+  panel.overlay.querySelector('[data-share-url]').value = url;
+  panel.overlay.querySelector('[data-copy]').addEventListener('click', async () => {
+    await copyText(url);
+    showToast('链接已复制');
+  });
+}
+
+function openShareManager() {
+  const panel = openOverlay({
+    title: '我的分享',
+    variant: 'full',
+    content: '<div data-share-list></div>',
+  });
+  const listNode = panel.overlay.querySelector('[data-share-list]');
+
+  async function load() {
+    listNode.innerHTML = loadingView();
+    try {
+      const data = await request('/drive/shares');
+      if (!data.items.length) {
+        listNode.innerHTML = `<div class="share-state">${icon('share')}<h2>还没有分享</h2><p>在文件或文件夹的更多操作中选择「分享」即可创建链接</p></div>`;
+        return;
+      }
+      listNode.innerHTML = `<div class="share-manage-list">${data.items.map((share) => {
+        const status = SHARE_STATUS[share.status] || SHARE_STATUS.gone;
+        const expiry = share.expiresAt ? `有效期至 ${formatDate(share.expiresAt)}` : '永久有效';
+        const meta = [expiry, `被访问 ${share.useCount} 次`, share.hasPasscode ? '提取码' : '无提取码'].join(' · ');
+        return `
+          <section class="share-manage-row" data-share="${share.id}">
+            <div class="share-manage-main">
+              <span class="file-symbol ${share.itemType === 'folder' ? 'folder-symbol' : ''}">${icon(share.itemType === 'folder' ? 'folder' : 'file')}</span>
+              <span class="drive-text">
+                <strong>${escapeHtml(share.name || '（内容已删除）')}</strong>
+                <small>${share.size ? formatSize(share.size) : ''}${share.size ? ' · ' : ''}${escapeHtml(meta)}</small>
+              </span>
+              <span class="${status.className}">${status.label}</span>
+            </div>
+            <div class="share-manage-actions">
+              ${share.status === 'active' ? '<button type="button" class="secondary-button" data-reset>重置链接</button>' : ''}
+              ${share.status !== 'revoked' ? '<button type="button" class="secondary-button danger-row" data-revoke>撤销</button>' : ''}
+            </div>
+          </section>`;
+      }).join('')}</div>`;
+      listNode.querySelectorAll('[data-reset]').forEach((button) => button.addEventListener('click', async () => {
+        const row = button.closest('[data-share]');
+        const shareId = row.dataset.share;
+        const accepted = await confirmDialog({ title: '重置链接', message: '重置后旧链接立即失效，确定继续吗？', confirmLabel: '重置' });
+        if (!accepted) return;
+        button.disabled = true;
+        try {
+          const result = await request(`/drive/share/${shareId}/reset`, { method: 'POST' });
+          showResetLink(result.path);
+          load();
+        } catch (error) {
+          showToast(error.message || '重置失败', 'error');
+          button.disabled = false;
+        }
+      }));
+      listNode.querySelectorAll('[data-revoke]').forEach((button) => button.addEventListener('click', async () => {
+        const row = button.closest('[data-share]');
+        const shareId = row.dataset.share;
+        const accepted = await confirmDialog({ title: '撤销分享', message: '撤销后该链接立即失效且无法恢复，确定继续吗？', confirmLabel: '撤销' });
+        if (!accepted) return;
+        button.disabled = true;
+        try {
+          await request(`/drive/share/${shareId}`, { method: 'DELETE' });
+          showToast('分享已撤销');
+          load();
+        } catch (error) {
+          showToast(error.message || '撤销失败', 'error');
+          button.disabled = false;
+        }
+      }));
+    } catch (error) {
+      listNode.innerHTML = errorView(error.message || '加载失败');
+    }
+  }
+
+  load();
+}
 
 function openPasswordDialog(onPasswordChanged) {
   const panel = openOverlay({
@@ -62,6 +161,10 @@ export function mountProfile(root, userEmail, onLogout, onPasswordChanged) {
         <div><h2>${escapeHtml(userEmail)}</h2><p>已验证邮箱</p></div>
       </section>
       <section class="settings-list">
+        <button type="button" class="settings-row" data-share-manager>
+          <span class="settings-icon">${icon('share')}</span>
+          <span><strong>我的分享</strong><small>管理已创建的分享链接</small></span>
+        </button>
         <button type="button" class="settings-row" data-change-password>
           <span class="settings-icon">${icon('key')}</span>
           <span><strong>修改密码</strong><small>修改后其他设备需要重新登录</small></span>
@@ -76,6 +179,7 @@ export function mountProfile(root, userEmail, onLogout, onPasswordChanged) {
         </button>
       </section>
     </div>`;
+  root.querySelector('[data-share-manager]').addEventListener('click', openShareManager);
   root.querySelector('[data-change-password]').addEventListener('click', () => openPasswordDialog(onPasswordChanged));
   root.querySelector('[data-logout]').addEventListener('click', onLogout);
 }

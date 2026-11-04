@@ -88,3 +88,27 @@ export function uploadForm(path, formData, onProgress) {
     xhr.send(formData);
   });
 }
+
+// 公开分享页专用：不携带登录态，401 也不触发登出流程。
+async function parsePublicResponse(response) {
+  const contentType = response.headers.get('content-type') || '';
+  const data = contentType.includes('application/json') ? await response.json() : await response.text();
+  if (!response.ok) {
+    throw new ApiError(data && data.message ? data.message : '请求失败', response.status, data);
+  }
+  return data;
+}
+
+export function requestPublic(path, options = {}) {
+  const { method = 'GET', body } = options;
+  return fetch(path, {
+    method,
+    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }).then(parsePublicResponse);
+}
+
+export async function requestPublicBlob(path) {
+  const response = await fetch(path);
+  return parsePublicResponse(response);
+}

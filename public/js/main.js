@@ -9,6 +9,7 @@ import { mountDrive } from './views/drive.js';
 import { mountTrash } from './views/trash.js';
 import { mountIntegrations } from './views/integrations.js';
 import { mountProfile } from './views/profile.js';
+import { mountShareView } from './views/share.js';
 
 function navigate(path, replace = false) {
   const hash = `#/${path.replace(/^\//, '')}`;
@@ -66,6 +67,14 @@ export function startApp() {
   }
 
   function render() {
+    const route = parseRoute(window.location.hash);
+    // 公开分享页在登录检查前短路，访客无需任何会话即可访问。
+    if (route.section === 'share') {
+      document.getElementById('overlay-root').innerHTML = '';
+      document.body.classList.remove('overlay-open');
+      mountShareView(app, route.id);
+      return;
+    }
     const session = getSession();
     if (!session.token) {
       mountAuth(app, (token, email) => {
@@ -76,7 +85,6 @@ export function startApp() {
       });
       return;
     }
-    const route = parseRoute(window.location.hash);
     if (!window.location.hash) navigate('files', true);
     renderShell(route);
   }

@@ -17,6 +17,7 @@ test('移动端路由解析保持稳定', async () => {
   const { parseRoute } = await loadUtils();
   assert.deepEqual(parseRoute('#/files/42'), { section: 'files', id: '42', search: '', scope: 'all' });
   assert.deepEqual(parseRoute('#/apps/7'), { section: 'apps', id: '7', search: '', scope: 'all' });
+  assert.deepEqual(parseRoute('#/share/nfs_sh_abc'), { section: 'share', id: 'nfs_sh_abc', search: '', scope: 'all' });
   assert.deepEqual(parseRoute('#/unknown'), { section: 'files', id: null, search: '', scope: 'all' });
   assert.deepEqual(parseRoute('#/files/42?q=%E6%8A%A5%E5%91%8A&scope=current'), {
     section: 'files', id: '42', search: '报告', scope: 'current',
@@ -207,4 +208,27 @@ test('上传链路支持按目录结构创建文件夹', () => {
   assert.match(uploadSource, /status !== 409/);
   assert.match(driveSource, /uploadEntries\(selectedFiles/);
   assert.match(driveSource, /toEntries\(Array\.from\(fileInput\.files/);
+});
+
+test('分享功能前后端接线完整且公开端点有限流', () => {
+  const appSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'app.js'), 'utf8');
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'main.js'), 'utf8');
+  const driveSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'drive.js'), 'utf8');
+  const profileSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'profile.js'), 'utf8');
+  const shareViewSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'share.js'), 'utf8');
+  assert.match(appSource, /app\.post\('\/drive\/share'/);
+  assert.match(appSource, /app\.get\('\/drive\/shares'/);
+  assert.match(appSource, /app\.post\('\/drive\/share\/:id\/reset'/);
+  assert.match(appSource, /app\.delete\('\/drive\/share\/:id'/);
+  assert.match(appSource, /app\.get\('\/share\/:token', authRateLimit/);
+  assert.match(appSource, /app\.post\('\/share\/:token\/verify', authRateLimit/);
+  assert.match(appSource, /app\.get\('\/share\/:token\/list', authRateLimit/);
+  assert.match(appSource, /app\.get\('\/share\/:token\/file\/:fileId', authRateLimit/);
+  assert.match(appSource, /hashApiToken\(token\)/);
+  assert.match(appSource, /isFolderInsideSharedTree/);
+  assert.match(mainSource, /mountShareView\(app, route\.id\)/);
+  assert.match(driveSource, /openShareDialog/);
+  assert.match(driveSource, /\/drive\/share/);
+  assert.match(profileSource, /\/drive\/shares/);
+  assert.match(shareViewSource, /\/share\/\$\{encodedToken\}\/verify/);
 });

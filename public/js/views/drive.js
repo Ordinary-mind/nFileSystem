@@ -1,7 +1,7 @@
 import { request, requestBlob } from '../core/api.js';
 import { fileIconName, icon } from '../core/icons.js';
 import { escapeHtml, formatDate, formatSize, getExtension, hasPressMoved, selectionKey } from '../core/utils.js';
-import { confirmDialog, errorView, loadingView, openActionSheet, openOverlay, promptText, showToast } from '../core/ui.js';
+import { confirmDialog, copyText, errorView, loadingView, openActionSheet, openOverlay, promptText, showToast } from '../core/ui.js';
 import { toEntries, uploadEntries } from '../features/upload.js';
 import { mountDragAndDrop } from '../features/dnd.js';
 import { mountImageViewer } from '../features/image-viewer.js';
@@ -407,6 +407,7 @@ export function mountDrive(root, folderId, navigate, route = {}) {
           { label: '打开', icon: 'folder', run: () => goFolder(item.id) },
           { label: '重命名', icon: 'edit', run: () => renameItem(item) },
           { label: '移动到', icon: 'move', run: () => openMove(item) },
+          { label: '分享', icon: 'share', run: () => openShareDialog(item) },
           { label: '多选', icon: 'check', run: () => toggleSelection(item) },
           { label: '删除', icon: 'trash', danger: true, run: () => deleteItem(item) },
         ]
@@ -415,10 +416,66 @@ export function mountDrive(root, folderId, navigate, route = {}) {
           { label: '下载', icon: 'download', run: () => downloadFile(item) },
           { label: '重命名', icon: 'edit', run: () => renameItem(item) },
           { label: '移动到', icon: 'move', run: () => openMove(item) },
+          { label: '分享', icon: 'share', run: () => openShareDialog(item) },
           { label: '多选', icon: 'check', run: () => toggleSelection(item) },
           { label: '删除', icon: 'trash', danger: true, run: () => deleteItem(item) },
         ];
     openActionSheet(item.name, actions);
+  }
+
+  function openShareDialog(item) {
+    let days = '7';
+    const panel = openOverlay({
+      title: '分享',
+      content: `
+        <div class="share-form" data-step="form">
+          <p class="field-hint">为「${escapeHtml(item.name)}」创建免登录访问链接</p>
+          <label class="field-label">有效期</label>
+          <div class="segmented-control share-expiry" role="group" aria-label="有效期">
+            <button type="button" class="segment" data-days="1">1 天</button>
+            <button type="button" class="segment active" data-days="7">7 天</button>
+            <button type="button" class="segment" data-days="30">30 天</button>
+            <button type="button" class="segment" data-days="">永久</button>
+          </div>
+          <label class="field-label" for="share-passcode">提取码（可选）</label>
+          <input class="text-field" id="share-passcode" data-passcode maxlength="6" autocomplete="off" placeholder="留空则无需提取码">
+          <p class="form-message" data-share-message aria-live="polite"></p>
+        </div>
+        <div class="share-result hidden" data-step="result">
+          <p class="field-hint">链接已创建，请立即复制保存（仅展示一次）：</p>
+          <input class="text-field" data-share-url readonly aria-label="分享链接">
+          <button type="button" class="primary-button" data-copy>复制链接</button>
+        </div>`,
+      submitLabel: '创建分享',
+      onSubmit: async ({ overlay }) => {
+        const message = overlay.querySelector('[data-share-message]');
+        const submitButton = overlay.querySelector('[data-submit]');
+        submitButton.disabled = true;
+        try {
+          const result = await request('/drive/share', {
+            method: 'POST',
+            body: { type: item.type, id: item.id, expiresIn: days, passcode: overlay.querySelector('[data-passcode]').value.trim() || undefined },
+          });
+          overlay.querySelector('[data-step="form"]').classList.add('hidden');
+          const resultView = overlay.querySelector('[data-step="result"]');
+          resultView.classList.remove('hidden');
+          resultView.querySelector('[data-share-url]').value = `${window.location.origin}${result.path}`;
+          resultView.querySelector('[data-copy]').addEventListener('click', async () => {
+            await copyText(resultView.querySelector('[data-share-url]').value);
+            showToast('链接已复制');
+          });
+          submitButton.classList.add('hidden');
+        } catch (error) {
+          message.textContent = error.message || '分享创建失败';
+          message.className = 'form-message error';
+          submitButton.disabled = false;
+        }
+      },
+    });
+    panel.overlay.querySelectorAll('.share-expiry .segment').forEach((button) => button.addEventListener('click', () => {
+      days = button.dataset.days;
+      panel.overlay.querySelectorAll('.share-expiry .segment').forEach((entry) => entry.classList.toggle('active', entry === button));
+    }));
   }
 
   async function moveItemTo(item, targetFolderId, targetName) {
