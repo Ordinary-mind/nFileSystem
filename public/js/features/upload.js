@@ -57,7 +57,7 @@ export async function uploadFiles(files, folderId, onProgress) {
 }
 
 export function toEntries(files) {
-  return Array.from(files || []).map((file) => ({ path: [file.name], file }));
+  return { entries: Array.from(files || []).map((file) => ({ path: [file.name], file })), dirs: [] };
 }
 
 async function ensureFolders(plan, baseFolderId, onProgress) {
@@ -86,9 +86,14 @@ async function ensureFolders(plan, baseFolderId, onProgress) {
 }
 
 export async function uploadEntries(items, folderId, onProgress) {
-  const input = Array.from(items || []).filter((item) => item && item.file);
-  if (!input.length) return { count: 0 };
-  const plan = buildFolderPlan(input.map((item) => item.path));
+  const input = Array.from(items?.entries || []).filter((item) => item && item.file);
+  const dirs = Array.from(items?.dirs || []).filter((path) => Array.isArray(path) && path.length);
+  if (!input.length && !dirs.length) return { count: 0, folders: 0 };
+  // 目录条目以空段结尾，前缀展开后即包含目录自身，保证空文件夹也会被创建。
+  const plan = buildFolderPlan([
+    ...input.map((item) => item.path),
+    ...dirs.map((path) => [...path, '']),
+  ]);
   const { folderIds, uploadStart } = await ensureFolders(plan, folderId, onProgress);
 
   const groups = new Map();
@@ -107,5 +112,5 @@ export async function uploadEntries(items, folderId, onProgress) {
     });
   }
   onProgress({ percent: 100, label: '上传完成' });
-  return { count: input.length };
+  return { count: input.length, folders: plan.length };
 }

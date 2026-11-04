@@ -1022,7 +1022,7 @@ app.post('/api/v1/folders', apiTokenRequired(['files:upload']), async (req, res)
 
     const targetParentId = await requireFolderInsideRoot(parentId || req.apiAuth.rootFolderId, req.apiAuth.rootFolderId, req.apiAuth.userId);
     const existing = await get(
-      'SELECT id FROM user_folders WHERE user_id = ? AND parent_id IS ? AND name = ?',
+      'SELECT id FROM user_folders WHERE user_id = ? AND parent_id IS ? AND name = ? AND deleted_at IS NULL',
       [req.apiAuth.userId, targetParentId, name]
     );
     if (existing) return res.status(409).json({ message: '同名文件夹已存在', id: existing.id });
@@ -1558,7 +1558,8 @@ app.post('/drive/folder', authRequired, asyncRoute(async (req, res) => {
       throw new HttpError(400, `文件夹层级不能超过 ${MAX_FOLDER_DEPTH} 层`);
     }
     const existing = await tx.get(`
-      SELECT id FROM user_folders WHERE user_id = ? AND parent_id IS ? AND name = ?
+      SELECT id FROM user_folders
+      WHERE user_id = ? AND parent_id IS ? AND name = ? AND deleted_at IS NULL
     `, [req.user.id, parentId, name]);
     if (existing) throw new HttpError(409, '同名文件夹已存在');
     return tx.run('INSERT INTO user_folders(user_id, parent_id, name) VALUES (?, ?, ?)', [req.user.id, parentId, name]);
@@ -1578,6 +1579,7 @@ app.put('/drive/folder/:id', authRequired, asyncRoute(async (req, res) => {
     const existing = await tx.get(`
       SELECT id FROM user_folders
       WHERE user_id = ? AND parent_id IS ? AND name = ? AND id != ?
+        AND deleted_at IS NULL
     `, [req.user.id, folder.parent_id, name, id]);
     if (existing) throw new HttpError(409, '同名文件夹已存在');
     await tx.run('UPDATE user_folders SET name = ? WHERE id = ? AND user_id = ?', [name, id, req.user.id]);
@@ -1675,6 +1677,7 @@ app.post('/drive/move', authRequired, asyncRoute(async (req, res) => {
       const duplicate = await tx.get(`
         SELECT id FROM user_folders
         WHERE user_id = ? AND parent_id IS ? AND name = ? AND id != ?
+          AND deleted_at IS NULL
       `, [req.user.id, targetFolderId, folder.name, id]);
       if (duplicate) throw new HttpError(409, '目标位置存在同名文件夹');
       await tx.run('UPDATE user_folders SET parent_id = ? WHERE id = ? AND user_id = ?', [targetFolderId, id, req.user.id]);

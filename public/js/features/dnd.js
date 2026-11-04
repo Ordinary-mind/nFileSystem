@@ -102,9 +102,9 @@ export function mountDragAndDrop({ root, list, onUpload, onMove, isInternalEnabl
     if (external) {
       runTask(async () => {
         const dropped = await droppedPromise;
-        if (dropped.unreadable) showToast(`${dropped.unreadable} 个文件无法读取，已跳过`, 'error');
-        if (!dropped.entries.length) return;
-        await onUpload(dropped.entries);
+        if (dropped.unreadable) showToast(`${dropped.unreadable} 个项目无法读取，已跳过`, 'error');
+        if (!dropped.entries.length && !dropped.dirs.length) return;
+        await onUpload(dropped);
       });
       return;
     }

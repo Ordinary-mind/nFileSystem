@@ -137,6 +137,7 @@ test('拖放收集保留目录结构并降级平铺', async () => {
   };
   const collected = await collectDroppedEntries(dataTransfer);
   assert.deepEqual(collected.entries.map((entry) => entry.path.join('/')), ['a.txt', 'docs/sub/b.txt']);
+  assert.deepEqual(collected.dirs, []);
   assert.equal(collected.unreadable, 0);
 
   const fallback = await collectDroppedEntries({ items: [], files: [rootFile] });
@@ -148,9 +149,16 @@ test('拖放收集保留目录结构并降级平铺', async () => {
     items: [{ kind: 'file', getAsFile: () => null, webkitGetAsEntry: () => broken }],
     files: [],
   });
-  assert.deepEqual(unreadable, { entries: [], unreadable: 1 });
+  assert.deepEqual(unreadable, { entries: [], dirs: [], unreadable: 1 });
 
-  assert.deepEqual(await collectDroppedEntries(null), { entries: [], unreadable: 0 });
+  const emptyDir = dirEntry('blank', []);
+  const emptyResult = await collectDroppedEntries({
+    items: [{ kind: 'file', getAsFile: () => null, webkitGetAsEntry: () => emptyDir }],
+    files: [],
+  });
+  assert.deepEqual(emptyResult, { entries: [], dirs: [['blank']], unreadable: 0 });
+
+  assert.deepEqual(await collectDroppedEntries(null), { entries: [], dirs: [], unreadable: 0 });
 });
 
 test('目录创建计划按层级去重且父级优先', async () => {

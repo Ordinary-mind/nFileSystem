@@ -487,7 +487,7 @@ export function mountDrive(root, folderId, navigate, route = {}) {
   }
 
   async function handleFiles(selectedFiles) {
-    if (!selectedFiles.length) return;
+    if (!selectedFiles.entries.length && !selectedFiles.dirs.length) return;
     const panel = showUploadProgress();
     panel.overlay.querySelector('[data-close]').disabled = true;
     try {
@@ -497,7 +497,10 @@ export function mountDrive(root, folderId, navigate, route = {}) {
       });
       await new Promise((resolve) => window.setTimeout(resolve, 350));
       panel.close();
-      showToast(`已处理 ${result.count} 个文件`);
+      const parts = [];
+      if (result.count) parts.push(`${result.count} 个文件`);
+      if (result.folders) parts.push(`${result.folders} 个文件夹`);
+      showToast(`已处理 ${parts.join('、') || '0 个项目'}`);
       load();
     } catch (error) {
       panel.close();

@@ -699,3 +699,26 @@ test('移动与重命名不受回收站中同名文件阻塞', async () => {
   const blocked = await api('/drive/move', { method: 'POST', token, body: { type: 'file', id: secondId, targetFolderId: subFolder } });
   assert.equal(blocked.response.status, 409);
 });
+
+test('文件夹删除后可重建同名且活跃同名仍被拒绝', async () => {
+  const token = await registerAndLogin(`folder-dup-${crypto.randomUUID()}`);
+  const name = 'dup-dir';
+
+  const first = await createFolder(token, name);
+  assert.ok(first);
+  assert.equal((await api(`/drive/folder/${first}`, { method: 'DELETE', token })).response.status, 200);
+
+  // 回收站中保留着同名的软删除文件夹，重建同名、向其上传与重命名回原名都不应被阻塞
+  const second = await createFolder(token, name);
+  assert.ok(second);
+  const uploaded = await upload(token, 'inner.txt', Buffer.from(`inner-${crypto.randomUUID()}`), second);
+  assert.equal(uploaded.response.status, 200);
+  assert.equal((await api(`/drive/folder/${second}`, { method: 'PUT', token, body: { name: 'renamed-dir' } })).response.status, 200);
+  assert.equal((await api(`/drive/folder/${second}`, { method: 'PUT', token, body: { name } })).response.status, 200);
+
+  // 目标位置存在活跃同名文件夹时移动仍应拒绝
+  const sibling = await createFolder(token, 'sibling');
+  const shadow = await createFolder(token, name, sibling);
+  const moveIntoRoot = await api('/drive/move', { method: 'POST', token, body: { type: 'folder', id: shadow, targetFolderId: null } });
+  assert.equal(moveIntoRoot.response.status, 409);
+});
