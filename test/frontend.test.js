@@ -105,25 +105,64 @@ test('拖放类型判定只把外部文件拖拽视为上传', async () => {
   assert.equal(hasFileDrag(null), false);
 });
 
-test('拖放内容忽略文件夹并保留可上传文件', async () => {
-  const { extractDroppedFiles } = await loadDndUtils();
-  const a = { name: 'a.txt' };
-  const b = { name: 'b.png' };
-  const item = (file, isDirectory = false) => ({
-    kind: 'file',
-    getAsFile: () => file,
-    webkitGetAsEntry: () => (isDirectory ? { isDirectory: true } : { isFile: true }),
+test('拖放收集保留目录结构并降级平铺', async () => {
+  const { collectDroppedEntries } = await loadDndUtils();
+  const rootFile = { name: 'a.txt' };
+  const nested = { name: 'b.txt' };
+  const fileEntry = (name, file) => ({ isFile: true, isDirectory: false, name, file: (success) => success(file) });
+  const dirEntry = (name, children) => ({
+    isFile: false, isDirectory: true, name,
+    createReader: () => {
+      let drained = false;
+      return {
+        readEntries: (success) => {
+          if (drained) success([]);
+          else {
+            drained = true;
+            success(children);
+          }
+        },
+      };
+    },
   });
-  assert.deepEqual(extractDroppedFiles({ items: [item(a), item(b)], files: [a, b] }), { files: [a, b], ignoredFolders: 0 });
-  assert.deepEqual(extractDroppedFiles({ items: [item(a), item({}, true)], files: [a] }), { files: [a], ignoredFolders: 1 });
-  assert.deepEqual(extractDroppedFiles({ items: [item({}, true)], files: [] }), { files: [], ignoredFolders: 1 });
-  assert.deepEqual(extractDroppedFiles({ items: [], files: [a] }), { files: [a], ignoredFolders: 0 });
-  assert.deepEqual(extractDroppedFiles({ files: [a, b] }), { files: [a, b], ignoredFolders: 0 });
-  assert.deepEqual(
-    extractDroppedFiles({ items: [{ kind: 'file', getAsFile: () => null, webkitGetAsEntry: () => null }], files: [a] }),
-    { files: [a], ignoredFolders: 0 }
-  );
-  assert.deepEqual(extractDroppedFiles(null), { files: [], ignoredFolders: 0 });
+  const dataTransfer = {
+    items: [
+      { kind: 'file', getAsFile: () => rootFile, webkitGetAsEntry: () => fileEntry('a.txt', rootFile) },
+      {
+        kind: 'file', getAsFile: () => null,
+        webkitGetAsEntry: () => dirEntry('docs', [dirEntry('sub', [fileEntry('b.txt', nested)])]),
+      },
+    ],
+    files: [],
+  };
+  const collected = await collectDroppedEntries(dataTransfer);
+  assert.deepEqual(collected.entries.map((entry) => entry.path.join('/')), ['a.txt', 'docs/sub/b.txt']);
+  assert.equal(collected.unreadable, 0);
+
+  const fallback = await collectDroppedEntries({ items: [], files: [rootFile] });
+  assert.deepEqual(fallback.entries.map((entry) => entry.path.join('/')), ['a.txt']);
+  assert.equal(fallback.unreadable, 0);
+
+  const broken = { isFile: true, isDirectory: false, name: 'x.bin', file: (success, failure) => failure(new Error('gone')) };
+  const unreadable = await collectDroppedEntries({
+    items: [{ kind: 'file', getAsFile: () => null, webkitGetAsEntry: () => broken }],
+    files: [],
+  });
+  assert.deepEqual(unreadable, { entries: [], unreadable: 1 });
+
+  assert.deepEqual(await collectDroppedEntries(null), { entries: [], unreadable: 0 });
+});
+
+test('目录创建计划按层级去重且父级优先', async () => {
+  const { buildFolderPlan } = await loadDndUtils();
+  const plan = buildFolderPlan([
+    ['docs', 'sub', 'b.txt'],
+    ['docs', 'a.txt'],
+    ['docs', 'sub', 'b.txt'],
+    ['a.txt'],
+  ]);
+  assert.deepEqual(plan, [['docs'], ['docs', 'sub']]);
+  assert.deepEqual(buildFolderPlan([]), []);
 });
 
 test('拖拽移动只接受合法的文件夹目标', async () => {
@@ -150,4 +189,14 @@ test('文件视图接入拖拽上传与拖拽移动并保持原有入口', () =>
   assert.match(driveSource, /fileInput\.addEventListener\('change'/);
   assert.match(mainSource, /document\.addEventListener\('dragover'/);
   assert.match(mainSource, /document\.addEventListener\('drop'/);
+});
+
+test('上传链路支持按目录结构创建文件夹', () => {
+  const uploadSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'features', 'upload.js'), 'utf8');
+  const driveSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'drive.js'), 'utf8');
+  assert.match(uploadSource, /export async function uploadEntries/);
+  assert.match(uploadSource, /\/drive\/folder/);
+  assert.match(uploadSource, /status !== 409/);
+  assert.match(driveSource, /uploadEntries\(selectedFiles/);
+  assert.match(driveSource, /toEntries\(Array\.from\(fileInput\.files/);
 });

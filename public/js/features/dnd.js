@@ -1,4 +1,4 @@
-import { extractDroppedFiles, hasFileDrag, isDropTargetValid } from '../core/dnd-utils.js';
+import { collectDroppedEntries, hasFileDrag, isDropTargetValid } from '../core/dnd-utils.js';
 import { showToast } from '../core/ui.js';
 
 function rowInfo(row) {
@@ -95,15 +95,17 @@ export function mountDragAndDrop({ root, list, onUpload, onMove, isInternalEnabl
     event.preventDefault();
     const source = draggingItem;
     const target = rowInfo(event.target.closest?.('.drive-row'));
-    const dropped = external ? extractDroppedFiles(event.dataTransfer) : { files: [], ignoredFolders: 0 };
+    // collectDroppedEntries 对 items 的同步遍历必须在事件周期内完成，随后才能复位拖拽状态。
+    const droppedPromise = external ? collectDroppedEntries(event.dataTransfer) : null;
     resetDragState();
     if (busy) return;
     if (external) {
-      if (dropped.ignoredFolders) {
-        showToast(`已忽略 ${dropped.ignoredFolders} 个文件夹，暂不支持上传文件夹`, 'error');
-      }
-      if (!dropped.files.length) return;
-      runTask(() => onUpload(dropped.files));
+      runTask(async () => {
+        const dropped = await droppedPromise;
+        if (dropped.unreadable) showToast(`${dropped.unreadable} 个文件无法读取，已跳过`, 'error');
+        if (!dropped.entries.length) return;
+        await onUpload(dropped.entries);
+      });
       return;
     }
     if (!isInternalEnabled() || !isDropTargetValid(source, target)) return;

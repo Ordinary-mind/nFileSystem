@@ -2,7 +2,7 @@ import { request, requestBlob } from '../core/api.js';
 import { fileIconName, icon } from '../core/icons.js';
 import { escapeHtml, formatDate, formatSize, getExtension, hasPressMoved, selectionKey } from '../core/utils.js';
 import { confirmDialog, errorView, loadingView, openActionSheet, openOverlay, promptText, showToast } from '../core/ui.js';
-import { uploadFiles } from '../features/upload.js';
+import { toEntries, uploadEntries } from '../features/upload.js';
 import { mountDragAndDrop } from '../features/dnd.js';
 import { mountImageViewer } from '../features/image-viewer.js';
 
@@ -44,7 +44,7 @@ export function mountDrive(root, folderId, navigate, route = {}) {
     </div>
     <div class="breadcrumb-strip" data-breadcrumb></div>
     <div class="drive-list" data-list>${loadingView()}</div>
-    <div class="drop-hint hidden" data-drop-hint aria-hidden="true">${icon('upload')}<strong>松开以上传文件</strong><span>文件将上传到当前目录</span></div>
+    <div class="drop-hint hidden" data-drop-hint aria-hidden="true">${icon('upload')}<strong>松开以上传</strong><span>文件与文件夹将上传到当前目录</span></div>
     <button type="button" class="fab" data-create aria-label="新建或上传">${icon('plus')}</button>
     <input type="file" multiple class="hidden" data-file-input>`;
 
@@ -491,7 +491,7 @@ export function mountDrive(root, folderId, navigate, route = {}) {
     const panel = showUploadProgress();
     panel.overlay.querySelector('[data-close]').disabled = true;
     try {
-      const result = await uploadFiles(selectedFiles, currentFolderId, ({ percent, label }) => {
+      const result = await uploadEntries(selectedFiles, currentFolderId, ({ percent, label }) => {
         panel.overlay.querySelector('[data-progress]').style.width = `${percent}%`;
         panel.overlay.querySelector('[data-progress-label]').textContent = label;
       });
@@ -549,7 +549,7 @@ export function mountDrive(root, folderId, navigate, route = {}) {
     { label: '上传文件', icon: 'upload', run: () => fileInput.click() },
     { label: '新建文件夹', icon: 'folder', run: createFolder },
   ]));
-  fileInput.addEventListener('change', () => handleFiles(Array.from(fileInput.files || [])));
+  fileInput.addEventListener('change', () => handleFiles(toEntries(Array.from(fileInput.files || []))));
   root.querySelector('[data-search-toggle]').addEventListener('click', () => {
     searchPanel.classList.toggle('hidden');
     if (!searchPanel.classList.contains('hidden')) searchInput.focus();
