@@ -216,6 +216,8 @@ test('分享功能前后端接线完整且公开端点有限流', () => {
   const driveSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'drive.js'), 'utf8');
   const profileSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'profile.js'), 'utf8');
   const shareViewSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'share.js'), 'utf8');
+  const apiSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'core', 'api.js'), 'utf8');
+  assert.match(apiSource, /export async function requestPublicBlob[\s\S]{0,400}return response\.blob\(\)/);
   assert.match(appSource, /app\.post\('\/drive\/share'/);
   assert.match(appSource, /app\.get\('\/drive\/shares'/);
   assert.match(appSource, /app\.post\('\/drive\/share\/:id\/reset'/);

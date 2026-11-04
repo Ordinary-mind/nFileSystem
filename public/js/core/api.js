@@ -110,5 +110,15 @@ export function requestPublic(path, options = {}) {
 
 export async function requestPublicBlob(path) {
   const response = await fetch(path);
-  return parsePublicResponse(response);
+  if (!response.ok) {
+    let message = '文件加载失败';
+    try {
+      const data = await response.json();
+      message = data.message || message;
+    } catch {
+      // 非 JSON 错误响应保持默认提示。
+    }
+    throw new ApiError(message, response.status);
+  }
+  return response.blob();
 }
