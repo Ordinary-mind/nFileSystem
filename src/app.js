@@ -1616,6 +1616,7 @@ app.put('/drive/file/:id', authRequired, asyncRoute(async (req, res) => {
     const duplicate = await tx.get(`
       SELECT id FROM user_files
       WHERE user_id = ? AND folder_id IS ? AND file_id = ? AND name = ? AND id != ?
+        AND deleted_at IS NULL
     `, [req.user.id, file.folder_id, file.file_id, name, id]);
     if (duplicate) throw new HttpError(409, '同名文件已存在');
     await tx.run('UPDATE user_files SET name = ? WHERE id = ? AND user_id = ?', [name, id, req.user.id]);
@@ -1685,6 +1686,7 @@ app.post('/drive/move', authRequired, asyncRoute(async (req, res) => {
       const duplicate = await tx.get(`
         SELECT id FROM user_files
         WHERE user_id = ? AND folder_id IS ? AND file_id = ? AND name = ? AND id != ?
+          AND deleted_at IS NULL
       `, [req.user.id, targetFolderId, file.file_id, file.name, id]);
       if (duplicate) throw new HttpError(409, '目标位置存在同名文件');
       await tx.run('UPDATE user_files SET folder_id = ? WHERE id = ? AND user_id = ?', [targetFolderId, id, req.user.id]);

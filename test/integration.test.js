@@ -664,3 +664,38 @@ test('关闭注册时禁止注册验证码但保留密码找回入口', async ()
     process.env.ALLOW_REGISTER = 'true';
   }
 });
+
+test('移动与重命名不受回收站中同名文件阻塞', async () => {
+  const token = await registerAndLogin(`trash-dup-${crypto.randomUUID()}`);
+  const name = 'dup-report.txt';
+  const content = Buffer.from(`trash-dup-${crypto.randomUUID()}`);
+
+  const first = await upload(token, name, content);
+  assert.equal(first.response.status, 200);
+  const firstId = first.data.files[0].id;
+  assert.equal((await api(`/drive/file/${firstId}`, { method: 'DELETE', token })).response.status, 200);
+
+  const second = await upload(token, name, content);
+  assert.equal(second.response.status, 200);
+  const secondId = second.data.files[0].id;
+  const subFolder = await createFolder(token, `sub-${crypto.randomUUID()}`);
+  const moveIn = await api('/drive/move', { method: 'POST', token, body: { type: 'file', id: secondId, targetFolderId: subFolder } });
+  assert.equal(moveIn.response.status, 200);
+
+  // 回收站中保留着同内容同名的软删除记录，移回根目录与重命名回原名都不应被它阻塞
+  const moveBack = await api('/drive/move', { method: 'POST', token, body: { type: 'file', id: secondId, targetFolderId: null } });
+  assert.equal(moveBack.response.status, 200);
+  const renameAway = await api(`/drive/file/${secondId}`, { method: 'PUT', token, body: { name: 'temp-report.txt' } });
+  assert.equal(renameAway.response.status, 200);
+  const renameBack = await api(`/drive/file/${secondId}`, { method: 'PUT', token, body: { name } });
+  assert.equal(renameBack.response.status, 200);
+
+  // 目标目录存在活跃同名文件时仍应拒绝
+  const record = await dbModule.get('SELECT user_id, file_id FROM user_files WHERE id = ?', [secondId]);
+  await dbModule.run(
+    'INSERT INTO user_files(user_id, folder_id, file_id, name) VALUES (?, ?, ?, ?)',
+    [record.user_id, subFolder, record.file_id, name]
+  );
+  const blocked = await api('/drive/move', { method: 'POST', token, body: { type: 'file', id: secondId, targetFolderId: subFolder } });
+  assert.equal(blocked.response.status, 409);
+});
