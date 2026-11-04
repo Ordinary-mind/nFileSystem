@@ -329,7 +329,7 @@ async function assertBaselineDatabase() {
     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
   `);
   if (version.user_version === 0 && tables.count === 0) return;
-  if (![1, 2].includes(version.user_version)) {
+  if (![1, 2, 3].includes(version.user_version)) {
     throw new Error('数据库不是当前基线版本，请清空 DATA_DIR 后重新启动');
   }
   const fileColumns = await rawAll('PRAGMA table_info(files)');
@@ -488,6 +488,24 @@ async function initDb() {
           revoked_at TEXT,
           created_at TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS shares (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          item_type TEXT NOT NULL CHECK (item_type IN ('file', 'folder')),
+          file_id INTEGER REFERENCES user_files(id) ON DELETE CASCADE,
+          folder_id INTEGER REFERENCES user_folders(id) ON DELETE CASCADE,
+          token_hash TEXT NOT NULL UNIQUE,
+          passcode_hash TEXT,
+          expires_at TEXT,
+          use_count INTEGER NOT NULL DEFAULT 0 CHECK (use_count >= 0),
+          revoked_at TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          CHECK (
+            (item_type = 'file' AND file_id IS NOT NULL AND folder_id IS NULL)
+            OR (item_type = 'folder' AND folder_id IS NOT NULL AND file_id IS NULL)
+          )
+        );
       `);
 
       await rawExec(`
@@ -509,6 +527,9 @@ async function initDb() {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_api_tokens_integration_name ON api_tokens(integration_id, name);
         CREATE INDEX IF NOT EXISTS idx_access_links_token ON access_links(token_hash);
         CREATE INDEX IF NOT EXISTS idx_access_links_file ON access_links(user_file_id);
+        CREATE INDEX IF NOT EXISTS idx_shares_user ON shares(user_id, revoked_at);
+        CREATE INDEX IF NOT EXISTS idx_shares_file ON shares(file_id);
+        CREATE INDEX IF NOT EXISTS idx_shares_folder ON shares(folder_id);
         CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
         CREATE INDEX IF NOT EXISTS idx_verification_subject ON verification_challenges(provider, provider_subject, purpose, id DESC);
         CREATE INDEX IF NOT EXISTS idx_verification_ip_created ON verification_challenges(requester_ip, created_at);
@@ -516,7 +537,7 @@ async function initDb() {
       `);
       await createIntegrityTriggers();
       await createSearchIndex();
-      await rawRun('PRAGMA user_version = 2');
+      await rawRun('PRAGMA user_version = 3');
       await rawRun('COMMIT');
     } catch (err) {
       await rawRun('ROLLBACK');

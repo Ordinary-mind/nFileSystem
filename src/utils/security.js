@@ -52,6 +52,18 @@ function verifyDownloadToken(token) {
   return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'], audience: 'file-download' });
 }
 
+/**
+ * 分享提取码验证凭证：短期签名，audience 绑定 share-pass，payload 中携带
+ * share id 与 token 哈希版本号，重置链接后旧凭证自动失效。
+ */
+function signSharePass(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '12h', algorithm: 'HS256', audience: 'share-pass' });
+}
+
+function verifySharePass(token) {
+  return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'], audience: 'share-pass' });
+}
+
 module.exports = {
   hashPassword,
   comparePassword,
@@ -59,4 +71,6 @@ module.exports = {
   verifyToken,
   signDownloadToken,
   verifyDownloadToken,
+  signSharePass,
+  verifySharePass,
 };

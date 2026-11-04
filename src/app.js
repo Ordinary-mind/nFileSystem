@@ -31,7 +31,7 @@ const {
   verifyFileRecord,
   isDigest,
 } = require('./storage');
-const { hashPassword, comparePassword, signToken, signDownloadToken } = require('./utils/security');
+const { hashPassword, comparePassword, signToken, signDownloadToken, signSharePass, verifySharePass } = require('./utils/security');
 const { authRequired, apiTokenRequired, downloadAuthRequired, hashApiToken } = require('./middleware/auth');
 const { initializeMailer } = require('./utils/mailer');
 const { getOrCreateThumbnail, removeThumbnail } = require('./thumbnail');
@@ -1176,6 +1176,329 @@ async function serveAccessLink(req, res, next) {
 }
 
 app.get('/n_file_system_api/access/:token', serveAccessLink);
+
+// ---------------------------------------------------------------------------
+// 分享功能：登录用户创建/管理，访客免登录访问
+// ---------------------------------------------------------------------------
+
+const SHARE_EXPIRY_DAYS = [1, 7, 30];
+
+function parseShareExpiry(value) {
+  if (value === undefined || value === null || value === '' || value === 'never') return null;
+  const days = Number(value);
+  if (!SHARE_EXPIRY_DAYS.includes(days)) throw new HttpError(400, '有效期档位不合法');
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function parseSharePasscode(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const code = String(value);
+  if (!/^[A-Za-z0-9]{4,6}$/.test(code)) throw new HttpError(400, '提取码必须是 4-6 位字母或数字');
+  return code;
+}
+
+async function resolveShareWith(query, token) {
+  const record = await query(`
+    SELECT s.id, s.user_id, s.item_type, s.file_id, s.folder_id, s.token_hash,
+           s.passcode_hash, s.expires_at, s.revoked_at,
+           fol.name AS root_name
+    FROM shares s
+    LEFT JOIN user_folders fol ON s.folder_id = fol.id AND fol.deleted_at IS NULL
+    WHERE s.token_hash = ?
+  `, [hashApiToken(token)]);
+  if (!record || record.revoked_at) throw new HttpError(404, '分享链接不存在或已撤销');
+  if (record.expires_at && new Date(record.expires_at).getTime() <= Date.now()) throw new HttpError(410, '分享链接已过期');
+  if (record.item_type === 'folder' && !record.root_name) throw new HttpError(404, '分享内容已删除');
+  return record;
+}
+
+function requireSharePass(req, share) {
+  if (!share.passcode_hash) return;
+  // 优先读取浏览器导航自动携带的 cookie（图片/下载链接），其次兼容自定义 header。
+  const cookie = String(req.headers.cookie || '')
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith('nfs_share='));
+  const credential = cookie ? cookie.slice('nfs_share='.length) : String(req.headers['x-share-pass'] || '');
+  if (!credential) throw new HttpError(401, '请先输入提取码');
+  let payload;
+  try {
+    payload = verifySharePass(credential);
+  } catch {
+    throw new HttpError(401, '提取码验证已过期，请重新验证');
+  }
+  if (payload.sid !== share.id || payload.v !== share.token_hash.slice(0, 16)) {
+    throw new HttpError(401, '提取码验证已失效，请重新验证');
+  }
+}
+
+async function isFolderInsideSharedTree(folderId, shareRootFolderId, userId, query = get) {
+  let currentId = folderId;
+  let depth = 0;
+  while (currentId !== null && depth <= MAX_FOLDER_DEPTH) {
+    if (Number(currentId) === Number(shareRootFolderId)) return true;
+    const folder = await query('SELECT parent_id FROM user_folders WHERE id = ? AND user_id = ?', [currentId, userId]);
+    currentId = folder ? folder.parent_id : null;
+    depth += 1;
+  }
+  return false;
+}
+
+async function resolveSharedFile(req, token, fileId) {
+  return transaction(async (tx) => {
+    const txQuery = (sql, params) => tx.get(sql, params);
+    const share = await resolveShareWith(txQuery, token);
+    await requireSharePass(req, share);
+    const file = await txQuery(`
+      SELECT uf.id, uf.folder_id, uf.name, f.id AS file_id, f.sha256, f.size, f.mime_type
+      FROM user_files uf
+      JOIN files f ON uf.file_id = f.id
+      WHERE uf.id = ? AND uf.deleted_at IS NULL
+    `, [fileId]);
+    if (!file) throw new HttpError(404, '文件不存在或已删除');
+    if (share.item_type === 'file') {
+      if (fileId !== share.file_id) throw new HttpError(403, '无权访问该文件');
+    } else if (!(await isFolderInsideSharedTree(file.folder_id, share.folder_id, share.user_id, txQuery))) {
+      throw new HttpError(403, '无权访问该文件');
+    }
+    return { share, file };
+  });
+}
+
+app.post('/drive/share', authRequired, asyncRoute(async (req, res) => {
+  const body = getRequestBody(req);
+  const type = body.type;
+  if (!['file', 'folder'].includes(type)) throw new HttpError(400, 'type 必须是 file 或 folder');
+  const id = parseRequiredId(body.id, 'id');
+  const expiresAt = parseShareExpiry(body.expiresIn);
+  const passcode = parseSharePasscode(body.passcode);
+
+  let target;
+  if (type === 'file') {
+    target = await get(`
+      SELECT uf.name FROM user_files uf
+      WHERE uf.id = ? AND uf.user_id = ? AND uf.deleted_at IS NULL
+    `, [id, req.user.id]);
+  } else {
+    target = await get(`
+      SELECT name FROM user_folders
+      WHERE id = ? AND user_id = ? AND deleted_at IS NULL
+    `, [id, req.user.id]);
+  }
+  if (!target) throw new HttpError(404, '分享对象不存在或已删除');
+
+  const token = randomToken('nfs_sh');
+  const passcodeHash = passcode ? await hashPassword(passcode) : null;
+  const result = await run(
+    `INSERT INTO shares(user_id, item_type, file_id, folder_id, token_hash, passcode_hash, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [req.user.id, type, type === 'file' ? id : null, type === 'folder' ? id : null, hashApiToken(token), passcodeHash, expiresAt]
+  );
+  addLog({ userId: req.user.id, action: 'share_create', targetType: type, targetId: id, detail: JSON.stringify({ shareId: result.lastID, expiresAt, hasPasscode: Boolean(passcode) }) }, req);
+  res.json({
+    message: '分享创建成功',
+    id: result.lastID,
+    token,
+    path: `/share/${token}`,
+    itemType: type,
+    name: target.name,
+    expiresAt,
+    hasPasscode: Boolean(passcode),
+  });
+}));
+
+app.get('/drive/shares', authRequired, asyncRoute(async (req, res) => {
+  const rows = await all(`
+    SELECT s.id, s.item_type, s.expires_at, s.use_count, s.revoked_at, s.passcode_hash, s.created_at,
+           COALESCE(uf.name, fol.name) AS name, f.size
+    FROM shares s
+    LEFT JOIN user_files uf ON s.item_type = 'file' AND uf.id = s.file_id AND uf.deleted_at IS NULL
+    LEFT JOIN user_folders fol ON s.item_type = 'folder' AND fol.id = s.folder_id AND fol.deleted_at IS NULL
+    LEFT JOIN files f ON s.item_type = 'file' AND uf.file_id = f.id
+    WHERE s.user_id = ?
+    ORDER BY s.id DESC
+  `, [req.user.id]);
+  const now = Date.now();
+  const items = rows.map((row) => {
+    let status = 'active';
+    if (row.revoked_at) status = 'revoked';
+    else if (row.name === null) status = 'gone';
+    else if (row.expires_at && new Date(row.expires_at).getTime() <= now) status = 'expired';
+    return {
+      id: row.id,
+      itemType: row.item_type,
+      name: row.name,
+      size: row.size === undefined ? null : row.size,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      useCount: row.use_count,
+      hasPasscode: Boolean(row.passcode_hash),
+      status,
+    };
+  });
+  res.json({ items });
+}));
+
+app.post('/drive/share/:id/reset', authRequired, asyncRoute(async (req, res) => {
+  const id = parseRequiredId(req.params.id, 'id');
+  const share = await get('SELECT id FROM shares WHERE id = ? AND user_id = ?', [id, req.user.id]);
+  if (!share) throw new HttpError(404, '分享不存在');
+  const token = randomToken('nfs_sh');
+  await run('UPDATE shares SET token_hash = ? WHERE id = ?', [hashApiToken(token), id]);
+  addLog({ userId: req.user.id, action: 'share_reset', targetType: 'share', targetId: id }, req);
+  res.json({ message: '链接已重置，旧链接立即失效', token, path: `/share/${token}` });
+}));
+
+app.delete('/drive/share/:id', authRequired, asyncRoute(async (req, res) => {
+  const id = parseRequiredId(req.params.id, 'id');
+  const result = await run(
+    'UPDATE shares SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL',
+    [new Date().toISOString(), id, req.user.id]
+  );
+  if (!result.changes) throw new HttpError(404, '分享不存在或已撤销');
+  addLog({ userId: req.user.id, action: 'share_revoke', targetType: 'share', targetId: id }, req);
+  res.json({ message: '分享已撤销' });
+}));
+
+app.get('/share/:token', authRateLimit, asyncRoute(async (req, res) => {
+  const token = String(req.params.token || '');
+  const share = await transaction(async (tx) => {
+    const record = await resolveShareWith((sql, params) => tx.get(sql, params), token);
+    if (record.item_type === 'file') {
+      const file = await tx.get(`
+        SELECT uf.name, f.size FROM user_files uf
+        JOIN files f ON uf.file_id = f.id
+        WHERE uf.id = ? AND uf.deleted_at IS NULL
+      `, [record.file_id]);
+      if (!file) throw new HttpError(404, '分享内容已删除');
+      return { ...record, name: file.name, size: file.size };
+    }
+    return { ...record, name: record.root_name, size: null };
+  });
+  res.json({
+    itemType: share.item_type,
+    name: share.name,
+    size: share.size,
+    fileId: share.item_type === 'file' ? share.file_id : null,
+    expiresAt: share.expires_at,
+    requiresPasscode: Boolean(share.passcode_hash),
+  });
+}));
+
+app.post('/share/:token/verify', authRateLimit, asyncRoute(async (req, res) => {
+  const token = String(req.params.token || '');
+  const share = await resolveShareWith(get, token);
+  if (!share.passcode_hash) return res.json({ message: '该分享无需提取码' });
+  const body = getRequestBody(req);
+  const passcode = String(body.passcode || '');
+  if (!passcode) throw new HttpError(400, '请输入提取码');
+  const ok = await comparePassword(passcode, share.passcode_hash);
+  if (!ok) throw new HttpError(403, '提取码不正确');
+  const credential = signSharePass({ sid: share.id, v: share.token_hash.slice(0, 16) });
+  res.cookie('nfs_share', credential, {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: req.secure,
+    maxAge: 12 * 60 * 60 * 1000,
+  });
+  addLog({ userId: share.user_id, action: 'share_unlock', targetType: 'share', targetId: share.id }, req);
+  res.json({ message: '验证通过' });
+}));
+
+app.get('/share/:token/list', authRateLimit, asyncRoute(async (req, res) => {
+  const token = String(req.params.token || '');
+  const share = await resolveShareWith(get, token);
+  if (share.item_type !== 'folder') throw new HttpError(400, '该分享不是文件夹分享');
+  await requireSharePass(req, share);
+  const folderId = parseOptionalId(req.query.folderId, 'folderId');
+  const targetId = folderId === null ? share.folder_id : folderId;
+  if (folderId !== null) {
+    const inside = await isFolderInsideSharedTree(targetId, share.folder_id, share.user_id);
+    if (!inside) throw new HttpError(403, '无权访问该目录');
+  }
+  const target = await get(
+    'SELECT id, name FROM user_folders WHERE id = ? AND user_id = ? AND deleted_at IS NULL',
+    [targetId, share.user_id]
+  );
+  if (!target) throw new HttpError(404, '目录不存在或已删除');
+
+  const crumbs = [];
+  let cursor = targetId;
+  while (cursor !== null && crumbs.length <= MAX_FOLDER_DEPTH) {
+    const folder = await get('SELECT id, parent_id, name FROM user_folders WHERE id = ? AND user_id = ?', [cursor, share.user_id]);
+    if (!folder) break;
+    crumbs.unshift({ id: folder.id, name: folder.name });
+    if (folder.id === share.folder_id) break;
+    cursor = folder.parent_id;
+  }
+  const breadcrumb = [{ id: null, name: share.root_name }, ...crumbs.filter((crumb) => crumb.id !== share.folder_id)];
+
+  const folders = await all(`
+    SELECT id, name FROM user_folders
+    WHERE user_id = ? AND parent_id IS ? AND deleted_at IS NULL
+    ORDER BY name COLLATE NOCASE LIMIT ?
+  `, [share.user_id, targetId, DRIVE_PAGE_SIZE]);
+  const files = await all(`
+    SELECT uf.id, uf.name, f.size, f.mime_type
+    FROM user_files uf
+    JOIN files f ON uf.file_id = f.id
+    WHERE uf.user_id = ? AND uf.folder_id IS ? AND uf.deleted_at IS NULL
+    ORDER BY uf.name COLLATE NOCASE LIMIT ?
+  `, [share.user_id, targetId, DRIVE_PAGE_SIZE]);
+  res.json({
+    folderId: targetId,
+    breadcrumb,
+    folders,
+    files: files.map((row) => ({
+      id: row.id,
+      name: row.name,
+      size: row.size,
+      mimeType: row.mime_type,
+      image: /^image\/(jpeg|png|webp|gif|avif)$/i.test(row.mime_type || ''),
+      text: /\.(txt|md|json|js|ts|css|html|xml|yml|yaml|conf|ini|sh|bat|log|csv|env)$/i.test(row.name || ''),
+    })),
+  });
+}));
+
+app.get('/share/:token/file/:fileId', authRateLimit, asyncRoute(async (req, res, next) => {
+  const token = String(req.params.token || '');
+  const fileId = parseRequiredId(req.params.fileId, 'fileId');
+  const download = req.query.dl === '1' || req.query.dl === 'true';
+  const { share, file } = await resolveSharedFile(req, token, fileId);
+  await run('UPDATE shares SET use_count = use_count + 1 WHERE id = ?', [share.id]);
+  addLog({ userId: share.user_id, action: 'share_file_access', targetType: 'file', targetId: fileId, detail: JSON.stringify({ shareId: share.id, download }) }, req);
+
+  const verification = await verifyFileRecord(file, false);
+  if (!verification.ok) throw new HttpError(404, '文件物理内容不存在或已损坏');
+  const fileName = normalizeFileName(file.name) || `${file.sha256}.bin`;
+  if (download) {
+    return res.download(verification.filePath, fileName, (err) => {
+      if (err && !res.headersSent) next(err);
+    });
+  }
+  if (file.mime_type) res.type(file.mime_type);
+  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+  return res.sendFile(verification.filePath, (err) => {
+    if (err && !res.headersSent) next(err);
+  });
+}));
+
+app.get('/share/:token/thumb/:fileId', authRateLimit, asyncRoute(async (req, res) => {
+  const token = String(req.params.token || '');
+  const fileId = parseRequiredId(req.params.fileId, 'fileId');
+  const { file } = await resolveSharedFile(req, token, fileId);
+  const thumbnailPath = await getOrCreateThumbnail({ sha256: file.sha256, mime_type: file.mime_type });
+  if (!thumbnailPath) throw new HttpError(404, '该文件类型不支持缩略图');
+  const etag = `"share-thumb-v1-${file.sha256}"`;
+  res.setHeader('ETag', etag);
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  if (req.headers['if-none-match'] === etag) {
+    return res.status(304).end();
+  }
+  return res.sendFile(thumbnailPath, (err) => {
+    if (err && !res.headersSent) throw new HttpError(500, '缩略图输出失败');
+  });
+}));
 
 
 app.post('/files/upload', authRequired, asyncRoute(uploadCapacity), uploadMiddleware, asyncRoute(async (req, res) => {

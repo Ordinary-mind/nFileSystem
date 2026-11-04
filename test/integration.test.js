@@ -109,7 +109,7 @@ after(async () => {
 
 test('数据库使用 SHA-256 基线结构', async () => {
   const version = await dbModule.get('PRAGMA user_version');
-  assert.equal(version.user_version, 2);
+  assert.equal(version.user_version, 3);
   const columns = await dbModule.all('PRAGMA table_info(files)');
   assert.deepEqual(columns.map((column) => column.name), ['id', 'sha256', 'size', 'mime_type', 'created_at', 'unreferenced_at']);
   await assert.rejects(
@@ -698,6 +698,124 @@ test('移动与重命名不受回收站中同名文件阻塞', async () => {
   );
   const blocked = await api('/drive/move', { method: 'POST', token, body: { type: 'file', id: secondId, targetFolderId: subFolder } });
   assert.equal(blocked.response.status, 409);
+});
+
+test('分享链接支持免登录访问、提取码与生命周期', async () => {
+  const token = await registerAndLogin(`share-${crypto.randomUUID()}`);
+  const content = Buffer.from(`share-content-${crypto.randomUUID()}`);
+  const uploaded = await upload(token, 'share-me.txt', content);
+  const fileId = uploaded.data.files[0].id;
+
+  const created = await api('/drive/share', { method: 'POST', token, body: { type: 'file', id: fileId, expiresIn: 7 } });
+  assert.equal(created.response.status, 200);
+  assert.match(created.data.path, /^\/share\/nfs_sh_/);
+
+  const visitor = await fetch(`${baseUrl}${created.data.path}`);
+  assert.equal(visitor.status, 200);
+  const meta = await visitor.json();
+  assert.equal(meta.itemType, 'file');
+  assert.equal(meta.name, 'share-me.txt');
+  assert.equal(meta.requiresPasscode, false);
+
+  const downloaded = await fetch(`${baseUrl}${created.data.path}/file/${fileId}`);
+  assert.equal(downloaded.status, 200);
+  assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), content);
+
+  const asDownload = await fetch(`${baseUrl}${created.data.path}/file/${fileId}?dl=1`);
+  assert.match(asDownload.headers.get('content-disposition'), /attachment/);
+
+  const other = await upload(token, 'other.txt', Buffer.from('other-content'));
+  const otherId = other.data.files[0].id;
+  const forbidden = await fetch(`${baseUrl}${created.data.path}/file/${otherId}`);
+  assert.equal(forbidden.status, 403);
+
+  const attacker = await registerAndLogin(`share-other-${crypto.randomUUID()}`);
+  const denied = await api('/drive/share', { method: 'POST', token: attacker, body: { type: 'file', id: fileId, expiresIn: 1 } });
+  assert.equal(denied.response.status, 404);
+
+  const passcoded = await api('/drive/share', { method: 'POST', token, body: { type: 'file', id: otherId, expiresIn: 1, passcode: 'ab12' } });
+  assert.equal(passcoded.response.status, 200);
+  const lockedMeta = await (await fetch(`${baseUrl}${passcoded.data.path}`)).json();
+  assert.equal(lockedMeta.requiresPasscode, true);
+  const locked = await fetch(`${baseUrl}${passcoded.data.path}/file/${otherId}`);
+  assert.equal(locked.status, 401);
+  const wrong = await api(`${passcoded.data.path}/verify`, { method: 'POST', body: { passcode: 'zzzz' } });
+  assert.equal(wrong.response.status, 403);
+  const right = await api(`${passcoded.data.path}/verify`, { method: 'POST', body: { passcode: 'ab12' } });
+  assert.equal(right.response.status, 200);
+  const setCookie = right.response.headers.get('set-cookie');
+  assert.match(setCookie, /nfs_share=/);
+  const unlocked = await fetch(`${baseUrl}${passcoded.data.path}/file/${otherId}`, {
+    headers: { Cookie: setCookie.split(';')[0] },
+  });
+  assert.equal(unlocked.status, 200);
+
+  const shares = await api('/drive/shares', { token });
+  assert.equal(shares.response.status, 200);
+  const passcodedItem = shares.data.items.find((item) => item.hasPasscode);
+  assert.ok(passcodedItem);
+  const revoked = await api(`/drive/share/${passcodedItem.id}`, { method: 'DELETE', token });
+  assert.equal(revoked.response.status, 200);
+  const afterRevoke = await fetch(`${baseUrl}${passcoded.data.path}`);
+  assert.equal(afterRevoke.status, 404);
+
+  const deleted = await api(`/drive/file/${fileId}`, { method: 'DELETE', token });
+  assert.equal(deleted.response.status, 200);
+  const gone = await fetch(`${baseUrl}${created.data.path}`);
+  assert.equal(gone.status, 404);
+
+  const fresh = await api('/drive/share', { method: 'POST', token, body: { type: 'file', id: otherId, expiresIn: 7 } });
+  assert.equal(fresh.response.status, 200);
+  await dbModule.run("UPDATE shares SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [fresh.data.id]);
+  const expiredVisitor = await fetch(`${baseUrl}${fresh.data.path}`);
+  assert.equal(expiredVisitor.status, 410);
+  const listAfter = await api('/drive/shares', { token });
+  assert.equal(listAfter.data.items.find((item) => item.id === fresh.data.id).status, 'expired');
+});
+
+test('文件夹分享支持子树浏览与越权拦截', async () => {
+  const token = await registerAndLogin(`folder-share-${crypto.randomUUID()}`);
+  const rootFolder = await createFolder(token, 'shared-root');
+  const sub = await createFolder(token, 'sub', rootFolder);
+  const inner = await upload(token, 'inner.txt', Buffer.from(`inner-${crypto.randomUUID()}`), sub);
+  const innerId = inner.data.files[0].id;
+  const outside = await upload(token, 'outside.txt', Buffer.from('outside-content'));
+
+  const created = await api('/drive/share', { method: 'POST', token, body: { type: 'folder', id: rootFolder, expiresIn: 'never' } });
+  assert.equal(created.response.status, 200);
+  const base = `${baseUrl}${created.data.path}`;
+
+  const meta = await (await fetch(base)).json();
+  assert.equal(meta.itemType, 'folder');
+  assert.equal(meta.name, 'shared-root');
+  assert.equal(meta.expiresAt, null);
+
+  const rootList = await (await fetch(`${base}/list`)).json();
+  assert.deepEqual(rootList.folders.map((entry) => entry.name), ['sub']);
+
+  const subList = await (await fetch(`${base}/list?folderId=${sub}`)).json();
+  assert.equal(subList.files.some((entry) => entry.id === innerId), true);
+  assert.equal(subList.breadcrumb.some((crumb) => crumb.name === 'sub'), true);
+
+  const download = await fetch(`${base}/file/${innerId}`);
+  assert.equal(download.status, 200);
+
+  const outsideAccess = await fetch(`${base}/file/${outside.data.files[0].id}`);
+  assert.equal(outsideAccess.status, 403);
+
+  const anotherFolder = await createFolder(token, 'outside-folder');
+  const denied = await fetch(`${base}/list?folderId=${anotherFolder}`);
+  assert.equal(denied.status, 403);
+
+  const moveOut = await api('/drive/move', { method: 'POST', token, body: { type: 'folder', id: sub, targetFolderId: null } });
+  assert.equal(moveOut.response.status, 200);
+  const afterMove = await fetch(`${base}/file/${innerId}`);
+  assert.equal(afterMove.status, 403);
+
+  const reset = await api(`/drive/share/${created.data.id}/reset`, { method: 'POST', token });
+  assert.equal(reset.response.status, 200);
+  const oldLink = await fetch(base);
+  assert.equal(oldLink.status, 404);
 });
 
 test('文件夹删除后可重建同名且活跃同名仍被拒绝', async () => {
