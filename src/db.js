@@ -365,9 +365,12 @@ async function initDb() {
           );
         `);
       }
-      if ((await rawGet('PRAGMA user_version')).user_version === 3) {
-        // 分享链接明文 token 保存以便所有者再次复制；旧分享可由「重置链接」补全。
-        await rawExec('ALTER TABLE shares ADD COLUMN token TEXT;');
+      if ((await rawGet('PRAGMA user_version')).user_version < 4) {
+        // 幂等迁移：仅当 shares 表已存在且缺少 token 列时补列，兼容版本号被回退的数据库。
+        const shareColumns = await rawAll('PRAGMA table_info(shares)');
+        if (shareColumns.length && !shareColumns.some((column) => column.name === 'token')) {
+          await rawExec('ALTER TABLE shares ADD COLUMN token TEXT;');
+        }
       }
 
       await rawExec(`
