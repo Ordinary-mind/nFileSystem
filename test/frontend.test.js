@@ -223,11 +223,13 @@ test('分享功能前后端接线完整且公开端点有限流', () => {
   assert.match(appSource, /app\.get\('\/share\/:token', \(req, res, next\)/);
   assert.match(appSource, /shareIndexHtml/);
   assert.match(appSource, /app\.post\('\/share\/:token\/verify', authRateLimit/);
-  assert.match(appSource, /app\.get\('\/share\/:token\/list', authRateLimit/);
-  assert.match(appSource, /app\.get\('\/share\/:token\/file\/:fileId', authRateLimit/);
+  assert.match(appSource, /function shareRateLimit\(req, res, next\)/);
+  assert.match(appSource, /app\.get\('\/share\/:token\/list', shareRateLimit/);
+  assert.match(appSource, /app\.get\('\/share\/:token\/file\/:fileId', shareRateLimit/);
+  assert.match(appSource, /app\.get\('\/share\/:token\/thumb\/:fileId', shareRateLimit/);
   assert.match(appSource, /hashApiToken\(token\)/);
   assert.match(appSource, /isFolderInsideSharedTree/);
-  assert.match(mainSource, /mountShareView\(app, route\.id\)/);
+  assert.match(mainSource, /mountShareView\(app, shareToken\)/);
   assert.match(driveSource, /openShareDialog/);
   assert.match(driveSource, /\/drive\/share/);
   assert.match(profileSource, /\/drive\/shares/);

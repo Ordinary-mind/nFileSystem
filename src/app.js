@@ -358,6 +358,39 @@ function authRateLimit(req, res, next) {
 const rateLimitTimer = setInterval(pruneAuthAttempts, 5 * 60 * 1000);
 rateLimitTimer.unref();
 
+// 分享访客端点（列表/文件/缩略图）属于资源型高频请求，使用独立且更宽松的限流桶，
+// 避免一屏缩略图就触发 429，也避免访客流量挤占登录接口的限流额度。
+const shareAttempts = new Map();
+const SHARE_RATE_LIMIT = parseIntegerEnv('SHARE_RATE_LIMIT', 300, 10, 10000);
+const SHARE_RATE_WINDOW_MS = parseIntegerEnv('SHARE_RATE_WINDOW_MS', 60 * 1000, 1000, 60 * 60 * 1000);
+
+function pruneShareAttempts(now = Date.now()) {
+  for (const [key, record] of shareAttempts) {
+    if (now >= record.resetTime) shareAttempts.delete(key);
+  }
+}
+
+function shareRateLimit(req, res, next) {
+  const now = Date.now();
+  const key = getClientIp(req);
+  let record = shareAttempts.get(key);
+  if (!record || now >= record.resetTime) {
+    if (shareAttempts.size >= MAX_RATE_LIMIT_KEYS) pruneShareAttempts(now);
+    if (shareAttempts.size >= MAX_RATE_LIMIT_KEYS) shareAttempts.delete(shareAttempts.keys().next().value);
+    record = { count: 0, resetTime: now + SHARE_RATE_WINDOW_MS };
+    shareAttempts.set(key, record);
+  }
+  record.count++;
+  if (record.count > SHARE_RATE_LIMIT) {
+    const retryAfter = Math.max(1, Math.ceil((record.resetTime - now) / 1000));
+    return res.status(429).set('Retry-After', String(retryAfter)).json({ message: '访问过于频繁，请稍后再试' });
+  }
+  return next();
+}
+
+const shareRateLimitTimer = setInterval(pruneShareAttempts, 5 * 60 * 1000);
+shareRateLimitTimer.unref();
+
 async function assertFolder(tx, folderId, userId, fieldName = '文件夹') {
   if (folderId === null) return null;
   const folder = await tx.get(
@@ -1245,7 +1278,7 @@ async function isFolderInsideSharedTree(folderId, shareRootFolderId, userId, que
 }
 
 async function resolveSharedFile(req, token, fileId) {
-  return transaction(async (tx) => {
+  return readTransaction(async (tx) => {
     const txQuery = (sql, params) => tx.get(sql, params);
     const share = await resolveShareWith(txQuery, token);
     await requireSharePass(req, share);
@@ -1369,26 +1402,26 @@ app.get('/share/:token', (req, res, next) => {
       if (err && !res.headersSent) next(err);
     });
   }
-  return authRateLimit(req, res, next);
+  return shareRateLimit(req, res, next);
 }, asyncRoute(async (req, res) => {
   const token = String(req.params.token || '');
-  const share = await transaction(async (tx) => {
-    const record = await resolveShareWith((sql, params) => tx.get(sql, params), token);
-    if (record.item_type === 'file') {
-      const file = await tx.get(`
-        SELECT uf.name, f.size FROM user_files uf
-        JOIN files f ON uf.file_id = f.id
-        WHERE uf.id = ? AND uf.deleted_at IS NULL
-      `, [record.file_id]);
-      if (!file) throw new HttpError(404, '分享内容已删除');
-      return { ...record, name: file.name, size: file.size };
-    }
-    return { ...record, name: record.root_name, size: null };
-  });
+  const share = await resolveShareWith(get, token);
+  let name = share.root_name;
+  let size = null;
+  if (share.item_type === 'file') {
+    const file = await get(`
+      SELECT uf.name, f.size FROM user_files uf
+      JOIN files f ON uf.file_id = f.id
+      WHERE uf.id = ? AND uf.deleted_at IS NULL
+    `, [share.file_id]);
+    if (!file) throw new HttpError(404, '分享内容已删除');
+    name = file.name;
+    size = file.size;
+  }
   res.json({
     itemType: share.item_type,
-    name: share.name,
-    size: share.size,
+    name,
+    size,
     fileId: share.item_type === 'file' ? share.file_id : null,
     expiresAt: share.expires_at,
     requiresPasscode: Boolean(share.passcode_hash),
@@ -1415,7 +1448,7 @@ app.post('/share/:token/verify', authRateLimit, asyncRoute(async (req, res) => {
   res.json({ message: '验证通过' });
 }));
 
-app.get('/share/:token/list', authRateLimit, asyncRoute(async (req, res) => {
+app.get('/share/:token/list', shareRateLimit, asyncRoute(async (req, res) => {
   const token = String(req.params.token || '');
   const share = await resolveShareWith(get, token);
   if (share.item_type !== 'folder') throw new HttpError(400, '该分享不是文件夹分享');
@@ -1447,19 +1480,20 @@ app.get('/share/:token/list', authRateLimit, asyncRoute(async (req, res) => {
     SELECT id, name FROM user_folders
     WHERE user_id = ? AND parent_id IS ? AND deleted_at IS NULL
     ORDER BY name COLLATE NOCASE LIMIT ?
-  `, [share.user_id, targetId, DRIVE_PAGE_SIZE]);
+  `, [share.user_id, targetId, DRIVE_PAGE_SIZE + 1]);
   const files = await all(`
     SELECT uf.id, uf.name, f.size, f.mime_type
     FROM user_files uf
     JOIN files f ON uf.file_id = f.id
     WHERE uf.user_id = ? AND uf.folder_id IS ? AND uf.deleted_at IS NULL
     ORDER BY uf.name COLLATE NOCASE LIMIT ?
-  `, [share.user_id, targetId, DRIVE_PAGE_SIZE]);
+  `, [share.user_id, targetId, DRIVE_PAGE_SIZE + 1]);
   res.json({
     folderId: targetId,
     breadcrumb,
-    folders,
-    files: files.map((row) => ({
+    truncated: folders.length > DRIVE_PAGE_SIZE || files.length > DRIVE_PAGE_SIZE,
+    folders: folders.slice(0, DRIVE_PAGE_SIZE),
+    files: files.slice(0, DRIVE_PAGE_SIZE).map((row) => ({
       id: row.id,
       name: row.name,
       size: row.size,
@@ -1470,13 +1504,16 @@ app.get('/share/:token/list', authRateLimit, asyncRoute(async (req, res) => {
   });
 }));
 
-app.get('/share/:token/file/:fileId', authRateLimit, asyncRoute(async (req, res, next) => {
+app.get('/share/:token/file/:fileId', shareRateLimit, asyncRoute(async (req, res, next) => {
   const token = String(req.params.token || '');
   const fileId = parseRequiredId(req.params.fileId, 'fileId');
   const download = req.query.dl === '1' || req.query.dl === 'true';
   const { share, file } = await resolveSharedFile(req, token, fileId);
-  await run('UPDATE shares SET use_count = use_count + 1 WHERE id = ?', [share.id]);
-  addLog({ userId: share.user_id, action: 'share_file_access', targetType: 'file', targetId: fileId, detail: JSON.stringify({ shareId: share.id, download }) }, req);
+  // HEAD 仅用于提取码会话探测，不计入访问次数与操作日志。
+  if (req.method !== 'HEAD') {
+    await run('UPDATE shares SET use_count = use_count + 1 WHERE id = ?', [share.id]);
+    addLog({ userId: share.user_id, action: 'share_file_access', targetType: 'file', targetId: fileId, detail: JSON.stringify({ shareId: share.id, download }) }, req);
+  }
 
   const verification = await verifyFileRecord(file, false);
   if (!verification.ok) throw new HttpError(404, '文件物理内容不存在或已损坏');
@@ -1493,7 +1530,7 @@ app.get('/share/:token/file/:fileId', authRateLimit, asyncRoute(async (req, res,
   });
 }));
 
-app.get('/share/:token/thumb/:fileId', authRateLimit, asyncRoute(async (req, res) => {
+app.get('/share/:token/thumb/:fileId', shareRateLimit, asyncRoute(async (req, res, next) => {
   const token = String(req.params.token || '');
   const fileId = parseRequiredId(req.params.fileId, 'fileId');
   const { file } = await resolveSharedFile(req, token, fileId);
@@ -1506,7 +1543,7 @@ app.get('/share/:token/thumb/:fileId', authRateLimit, asyncRoute(async (req, res
     return res.status(304).end();
   }
   return res.sendFile(thumbnailPath, (err) => {
-    if (err && !res.headersSent) throw new HttpError(500, '缩略图输出失败');
+    if (err && !res.headersSent) next(err);
   });
 }));
 

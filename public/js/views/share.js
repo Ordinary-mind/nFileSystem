@@ -28,6 +28,14 @@ export function mountShareView(root, token) {
   root.innerHTML = `<div class="share-screen" data-share><div class="share-state">${icon('info')}<p>正在加载分享内容</p></div></div>`;
   const screen = root.querySelector('[data-share]');
 
+  // 缩略图加载失败时回退为文件图标，避免破图（监听只绑定一次到稳定容器）。
+  screen.addEventListener('error', (event) => {
+    const image = event.target;
+    if (!(image instanceof HTMLImageElement)) return;
+    const symbol = image.closest('.file-symbol');
+    if (symbol) symbol.innerHTML = icon('image');
+  }, true);
+
   function failView(message) {
     screen.innerHTML = `${topbar(null)}${stateView('info', '链接已失效或已过期', message || '请联系分享者重新发送链接')}`;
   }
@@ -38,7 +46,7 @@ export function mountShareView(root, token) {
       <form class="share-passcode" data-pass-form>
         <h2>输入提取码</h2>
         <p>${share ? `「${escapeHtml(share.name)}」已开启提取码保护` : '该分享已开启提取码保护'}</p>
-        <input class="text-field" data-pass-input maxlength="6" autocomplete="off" inputmode="numeric" required aria-label="提取码">
+        <input class="text-field" data-pass-input maxlength="6" autocomplete="off" autocapitalize="off" spellcheck="false" required aria-label="提取码">
         <button type="submit" class="primary-button">验证并查看</button>
         <p class="form-message${message ? ' error' : ''}" data-pass-message aria-live="polite">${escapeHtml(message)}</p>
       </form>`;
@@ -171,7 +179,8 @@ export function mountShareView(root, token) {
       const listHtml = data.folders.length || data.files.length
         ? `<div class="share-list">${data.folders.map(folderRow).join('')}${data.files.map((item) => fileRow(item, true)).join('')}</div>`
         : stateView('folder', '空文件夹', '这里没有可查看的内容');
-      list.innerHTML = `${renderBreadcrumb(data.breadcrumb)}${listHtml}`;
+      const notice = data.truncated ? '<p class="share-notice">内容较多，仅显示前 200 项</p>' : '';
+      list.innerHTML = `${renderBreadcrumb(data.breadcrumb)}${notice}${listHtml}`;
       list.querySelectorAll('[data-share-folder]').forEach((button) => button.addEventListener('click', () => loadFolder(button.dataset.shareFolder || null)));
       list.querySelectorAll('[data-share-crumb]').forEach((button) => button.addEventListener('click', () => loadFolder(button.dataset.shareCrumb || null)));
       list.querySelectorAll('[data-share-open]').forEach((button) => button.addEventListener('click', () => {
@@ -184,13 +193,6 @@ export function mountShareView(root, token) {
           { label: '下载文件', icon: 'download', run: () => downloadShareFile(item) },
         ]);
       }));
-      // 缩略图加载失败时回退为文件图标，避免破图。
-      list.addEventListener('error', (event) => {
-        const image = event.target;
-        if (!(image instanceof HTMLImageElement)) return;
-        const symbol = image.closest('.file-symbol');
-        if (symbol) symbol.innerHTML = icon('image');
-      }, true);
     } catch (error) {
       if (error.status === 401) return requirePasscodeView('提取码验证已过期，请重新输入');
       list.innerHTML = stateView('info', '加载失败', error.message || '分享内容加载失败');

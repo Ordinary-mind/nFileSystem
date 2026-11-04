@@ -67,20 +67,15 @@ export function startApp() {
   }
 
   function render() {
-    // 兼容路径式分享链接（/share/<token>）与 hash 式（#/share/<token>）。
-    const pathMatch = window.location.pathname.match(/^\/share\/([^/]+)\/?$/);
-    if (pathMatch) {
-      document.getElementById('overlay-root').innerHTML = '';
-      document.body.classList.remove('overlay-open');
-      mountShareView(app, decodeURIComponent(pathMatch[1]));
-      return;
-    }
     const route = parseRoute(window.location.hash);
+    // 兼容路径式分享链接（/share/<token>）与 hash 式（#/share/<token>），hash 优先。
+    const pathMatch = window.location.pathname.match(/^\/share\/([^/]+)\/?$/);
+    const shareToken = route.section === 'share' ? route.id : (pathMatch ? decodeURIComponent(pathMatch[1]) : null);
     // 公开分享页在登录检查前短路，访客无需任何会话即可访问。
-    if (route.section === 'share') {
+    if (shareToken) {
       document.getElementById('overlay-root').innerHTML = '';
       document.body.classList.remove('overlay-open');
-      mountShareView(app, route.id);
+      mountShareView(app, shareToken);
       return;
     }
     const session = getSession();
