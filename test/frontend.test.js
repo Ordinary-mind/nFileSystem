@@ -233,5 +233,7 @@ test('分享功能前后端接线完整且公开端点有限流', () => {
   assert.match(driveSource, /openShareDialog/);
   assert.match(driveSource, /\/drive\/share/);
   assert.match(profileSource, /\/drive\/shares/);
+  assert.match(profileSource, /data-copy-share/);
+  assert.match(profileSource, /data-delete/);
   assert.match(shareViewSource, /\/share\/\$\{encodedToken\}\/verify/);
 });

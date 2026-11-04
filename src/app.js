@@ -1323,9 +1323,9 @@ app.post('/drive/share', authRequired, asyncRoute(async (req, res) => {
   const token = randomToken('nfs_sh');
   const passcodeHash = passcode ? await hashPassword(passcode) : null;
   const result = await run(
-    `INSERT INTO shares(user_id, item_type, file_id, folder_id, token_hash, passcode_hash, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [req.user.id, type, type === 'file' ? id : null, type === 'folder' ? id : null, hashApiToken(token), passcodeHash, expiresAt]
+    `INSERT INTO shares(user_id, item_type, file_id, folder_id, token, token_hash, passcode_hash, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [req.user.id, type, type === 'file' ? id : null, type === 'folder' ? id : null, token, hashApiToken(token), passcodeHash, expiresAt]
   );
   addLog({ userId: req.user.id, action: 'share_create', targetType: type, targetId: id, detail: JSON.stringify({ shareId: result.lastID, expiresAt, hasPasscode: Boolean(passcode) }) }, req);
   res.json({
@@ -1343,7 +1343,7 @@ app.post('/drive/share', authRequired, asyncRoute(async (req, res) => {
 app.get('/drive/shares', authRequired, asyncRoute(async (req, res) => {
   const rows = await all(`
     SELECT s.id, s.item_type, s.expires_at, s.use_count, s.revoked_at, s.passcode_hash, s.created_at,
-           COALESCE(uf.name, fol.name) AS name, f.size
+           s.token, COALESCE(uf.name, fol.name) AS name, f.size
     FROM shares s
     LEFT JOIN user_files uf ON s.item_type = 'file' AND uf.id = s.file_id AND uf.deleted_at IS NULL
     LEFT JOIN user_folders fol ON s.item_type = 'folder' AND fol.id = s.folder_id AND fol.deleted_at IS NULL
@@ -1366,6 +1366,8 @@ app.get('/drive/shares', authRequired, asyncRoute(async (req, res) => {
       expiresAt: row.expires_at,
       useCount: row.use_count,
       hasPasscode: Boolean(row.passcode_hash),
+      token: row.token || null,
+      path: row.token ? `/share/${row.token}` : null,
       status,
     };
   });
@@ -1377,20 +1379,17 @@ app.post('/drive/share/:id/reset', authRequired, asyncRoute(async (req, res) => 
   const share = await get('SELECT id FROM shares WHERE id = ? AND user_id = ?', [id, req.user.id]);
   if (!share) throw new HttpError(404, '分享不存在');
   const token = randomToken('nfs_sh');
-  await run('UPDATE shares SET token_hash = ? WHERE id = ?', [hashApiToken(token), id]);
+  await run('UPDATE shares SET token = ?, token_hash = ? WHERE id = ?', [token, hashApiToken(token), id]);
   addLog({ userId: req.user.id, action: 'share_reset', targetType: 'share', targetId: id }, req);
   res.json({ message: '链接已重置，旧链接立即失效', token, path: `/share/${token}` });
 }));
 
 app.delete('/drive/share/:id', authRequired, asyncRoute(async (req, res) => {
   const id = parseRequiredId(req.params.id, 'id');
-  const result = await run(
-    'UPDATE shares SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL',
-    [new Date().toISOString(), id, req.user.id]
-  );
-  if (!result.changes) throw new HttpError(404, '分享不存在或已撤销');
-  addLog({ userId: req.user.id, action: 'share_revoke', targetType: 'share', targetId: id }, req);
-  res.json({ message: '分享已撤销' });
+  const result = await run('DELETE FROM shares WHERE id = ? AND user_id = ?', [id, req.user.id]);
+  if (!result.changes) throw new HttpError(404, '分享不存在');
+  addLog({ userId: req.user.id, action: 'share_delete', targetType: 'share', targetId: id }, req);
+  res.json({ message: '分享已删除' });
 }));
 
 const shareIndexHtml = path.join(__dirname, '..', 'public', 'index.html');

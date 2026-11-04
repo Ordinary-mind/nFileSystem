@@ -109,7 +109,7 @@ after(async () => {
 
 test('数据库使用 SHA-256 基线结构', async () => {
   const version = await dbModule.get('PRAGMA user_version');
-  assert.equal(version.user_version, 3);
+  assert.equal(version.user_version, 4);
   const columns = await dbModule.all('PRAGMA table_info(files)');
   assert.deepEqual(columns.map((column) => column.name), ['id', 'sha256', 'size', 'mime_type', 'created_at', 'unreferenced_at']);
   await assert.rejects(
@@ -121,7 +121,7 @@ test('数据库使用 SHA-256 基线结构', async () => {
 test('非基线数据库会拒绝启动', async () => {
   const oldDataDir = path.join(testRoot, 'old-schema');
   await fs.promises.mkdir(oldDataDir, { recursive: true });
-  await createVersionedDatabase(path.join(oldDataDir, 'app.db'), 4);
+  await createVersionedDatabase(path.join(oldDataDir, 'app.db'), 5);
   const result = spawnSync(process.execPath, ['-e', "require('./src/db').initDb().catch((err) => { console.error(err.message); process.exit(1); })"], {
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, DATA_DIR: oldDataDir },
@@ -129,6 +129,39 @@ test('非基线数据库会拒绝启动', async () => {
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /数据库不是当前基线版本/);
+});
+
+test('v3 数据库升级到 v4 并补齐分享链接列', async () => {
+  const migrateDir = path.join(testRoot, 'v3-schema');
+  await fs.promises.mkdir(migrateDir, { recursive: true });
+  const migratePath = path.join(migrateDir, 'app.db');
+  await new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(migratePath);
+    db.exec(`
+      CREATE TABLE files(id INTEGER PRIMARY KEY, sha256 TEXT, size INTEGER, mime_type TEXT, created_at TEXT, unreferenced_at TEXT);
+      CREATE TABLE shares(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, item_type TEXT,
+        file_id INTEGER, folder_id INTEGER, token_hash TEXT, passcode_hash TEXT,
+        expires_at TEXT, use_count INTEGER DEFAULT 0, revoked_at TEXT, created_at TEXT
+      );
+      PRAGMA user_version = 3;
+    `, (err) => (err ? db.close(() => reject(err)) : db.close(resolve)));
+  });
+  const result = spawnSync(process.execPath, ['-e', "require('./src/db').initDb().catch((err) => { console.error(err.message); process.exit(1); })"], {
+    cwd: path.join(__dirname, '..'),
+    env: { ...process.env, DATA_DIR: migrateDir, UPLOAD_DIR: path.join(migrateDir, 'uploads') },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const info = await new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(migratePath);
+    db.all('PRAGMA table_info(shares); PRAGMA user_version;', (err, rows) => {
+      db.close();
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+  assert.equal(info.some((row) => row.name === 'token'), true);
 });
 
 test('安全响应头和健康检查可用', async () => {
@@ -759,10 +792,17 @@ test('分享链接支持免登录访问、提取码与生命周期', async () =>
   assert.equal(shares.response.status, 200);
   const passcodedItem = shares.data.items.find((item) => item.hasPasscode);
   assert.ok(passcodedItem);
+  // 列表返回可复制的链接，且该链接与创建时一致
+  assert.match(passcodedItem.token, /^nfs_sh_/);
+  assert.equal(passcodedItem.path, passcoded.data.path);
+  assert.equal((await fetch(`${baseUrl}${passcodedItem.path}`)).status, 200);
+
   const revoked = await api(`/drive/share/${passcodedItem.id}`, { method: 'DELETE', token });
   assert.equal(revoked.response.status, 200);
   const afterRevoke = await fetch(`${baseUrl}${passcoded.data.path}`);
   assert.equal(afterRevoke.status, 404);
+  const listAfterDelete = await api('/drive/shares', { token });
+  assert.equal(listAfterDelete.data.items.some((item) => item.id === passcodedItem.id), false);
 
   const deleted = await api(`/drive/file/${fileId}`, { method: 'DELETE', token });
   assert.equal(deleted.response.status, 200);

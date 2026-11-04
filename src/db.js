@@ -329,7 +329,7 @@ async function assertBaselineDatabase() {
     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
   `);
   if (version.user_version === 0 && tables.count === 0) return;
-  if (![1, 2, 3].includes(version.user_version)) {
+  if (![1, 2, 3, 4].includes(version.user_version)) {
     throw new Error('数据库不是当前基线版本，请清空 DATA_DIR 后重新启动');
   }
   const fileColumns = await rawAll('PRAGMA table_info(files)');
@@ -364,6 +364,10 @@ async function initDb() {
             UNIQUE(user_id, item_type, item_id, deleted_at)
           );
         `);
+      }
+      if ((await rawGet('PRAGMA user_version')).user_version === 3) {
+        // 分享链接明文 token 保存以便所有者再次复制；旧分享可由「重置链接」补全。
+        await rawExec('ALTER TABLE shares ADD COLUMN token TEXT;');
       }
 
       await rawExec(`
@@ -495,6 +499,7 @@ async function initDb() {
           item_type TEXT NOT NULL CHECK (item_type IN ('file', 'folder')),
           file_id INTEGER REFERENCES user_files(id) ON DELETE CASCADE,
           folder_id INTEGER REFERENCES user_folders(id) ON DELETE CASCADE,
+          token TEXT,
           token_hash TEXT NOT NULL UNIQUE,
           passcode_hash TEXT,
           expires_at TEXT,
@@ -537,7 +542,7 @@ async function initDb() {
       `);
       await createIntegrityTriggers();
       await createSearchIndex();
-      await rawRun('PRAGMA user_version = 3');
+      await rawRun('PRAGMA user_version = 4');
       await rawRun('COMMIT');
     } catch (err) {
       await rawRun('ROLLBACK');

@@ -59,11 +59,22 @@ function openShareManager() {
               <span class="${status.className}">${status.label}</span>
             </div>
             <div class="share-manage-actions">
-              ${share.status === 'active' ? '<button type="button" class="secondary-button" data-reset>重置链接</button>' : ''}
-              ${share.status !== 'revoked' ? '<button type="button" class="secondary-button danger-row" data-revoke>撤销</button>' : ''}
+              <button type="button" class="secondary-button" data-copy-share>复制链接</button>
+              ${share.status === 'active' ? '<button type="button" class="secondary-button" data-reset>重置</button>' : ''}
+              <button type="button" class="secondary-button danger-row" data-delete>删除</button>
             </div>
           </section>`;
       }).join('')}</div>`;
+      listNode.querySelectorAll('[data-copy-share]').forEach((button) => button.addEventListener('click', async () => {
+        const row = button.closest('[data-share]');
+        const share = data.items.find((item) => String(item.id) === row.dataset.share);
+        if (!share?.path) {
+          showToast('此分享创建于旧版本，请先重置链接后再复制', 'error');
+          return;
+        }
+        await copyText(`${window.location.origin}${share.path}`);
+        showToast('链接已复制');
+      }));
       listNode.querySelectorAll('[data-reset]').forEach((button) => button.addEventListener('click', async () => {
         const row = button.closest('[data-share]');
         const shareId = row.dataset.share;
@@ -79,18 +90,18 @@ function openShareManager() {
           button.disabled = false;
         }
       }));
-      listNode.querySelectorAll('[data-revoke]').forEach((button) => button.addEventListener('click', async () => {
+      listNode.querySelectorAll('[data-delete]').forEach((button) => button.addEventListener('click', async () => {
         const row = button.closest('[data-share]');
         const shareId = row.dataset.share;
-        const accepted = await confirmDialog({ title: '撤销分享', message: '撤销后该链接立即失效且无法恢复，确定继续吗？', confirmLabel: '撤销' });
+        const accepted = await confirmDialog({ title: '删除分享', message: '删除后该链接立即失效且记录不可恢复，确定继续吗？', confirmLabel: '删除' });
         if (!accepted) return;
         button.disabled = true;
         try {
           await request(`/drive/share/${shareId}`, { method: 'DELETE' });
-          showToast('分享已撤销');
+          showToast('分享已删除');
           load();
         } catch (error) {
-          showToast(error.message || '撤销失败', 'error');
+          showToast(error.message || '删除失败', 'error');
           button.disabled = false;
         }
       }));
