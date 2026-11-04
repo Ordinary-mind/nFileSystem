@@ -220,7 +220,8 @@ test('分享功能前后端接线完整且公开端点有限流', () => {
   assert.match(appSource, /app\.get\('\/drive\/shares'/);
   assert.match(appSource, /app\.post\('\/drive\/share\/:id\/reset'/);
   assert.match(appSource, /app\.delete\('\/drive\/share\/:id'/);
-  assert.match(appSource, /app\.get\('\/share\/:token', authRateLimit/);
+  assert.match(appSource, /app\.get\('\/share\/:token', \(req, res, next\)/);
+  assert.match(appSource, /shareIndexHtml/);
   assert.match(appSource, /app\.post\('\/share\/:token\/verify', authRateLimit/);
   assert.match(appSource, /app\.get\('\/share\/:token\/list', authRateLimit/);
   assert.match(appSource, /app\.get\('\/share\/:token\/file\/:fileId', authRateLimit/);

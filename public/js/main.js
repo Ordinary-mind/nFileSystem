@@ -67,6 +67,14 @@ export function startApp() {
   }
 
   function render() {
+    // 兼容路径式分享链接（/share/<token>）与 hash 式（#/share/<token>）。
+    const pathMatch = window.location.pathname.match(/^\/share\/([^/]+)\/?$/);
+    if (pathMatch) {
+      document.getElementById('overlay-root').innerHTML = '';
+      document.body.classList.remove('overlay-open');
+      mountShareView(app, decodeURIComponent(pathMatch[1]));
+      return;
+    }
     const route = parseRoute(window.location.hash);
     // 公开分享页在登录检查前短路，访客无需任何会话即可访问。
     if (route.section === 'share') {

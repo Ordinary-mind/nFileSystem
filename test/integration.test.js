@@ -717,6 +717,11 @@ test('分享链接支持免登录访问、提取码与生命周期', async () =>
   assert.equal(meta.name, 'share-me.txt');
   assert.equal(meta.requiresPasscode, false);
 
+  // 浏览器直接打开链接（Accept: text/html）返回 SPA 页面而非 JSON
+  const htmlEntry = await fetch(`${baseUrl}${created.data.path}`, { headers: { Accept: 'text/html' } });
+  assert.equal(htmlEntry.status, 200);
+  assert.match(await htmlEntry.text(), /<div id="app"/);
+
   const downloaded = await fetch(`${baseUrl}${created.data.path}/file/${fileId}`);
   assert.equal(downloaded.status, 200);
   assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), content);

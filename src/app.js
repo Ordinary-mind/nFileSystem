@@ -1360,7 +1360,17 @@ app.delete('/drive/share/:id', authRequired, asyncRoute(async (req, res) => {
   res.json({ message: '分享已撤销' });
 }));
 
-app.get('/share/:token', authRateLimit, asyncRoute(async (req, res) => {
+const shareIndexHtml = path.join(__dirname, '..', 'public', 'index.html');
+
+app.get('/share/:token', (req, res, next) => {
+  // 浏览器直接打开链接时返回 SPA 页面，由前端路由渲染分享视图；程序化 fetch 继续走 JSON。
+  if (String(req.headers.accept || '').includes('text/html')) {
+    return res.sendFile(shareIndexHtml, (err) => {
+      if (err && !res.headersSent) next(err);
+    });
+  }
+  return authRateLimit(req, res, next);
+}, asyncRoute(async (req, res) => {
   const token = String(req.params.token || '');
   const share = await transaction(async (tx) => {
     const record = await resolveShareWith((sql, params) => tx.get(sql, params), token);
