@@ -29,6 +29,7 @@ coverage/
 Thumbs.db
 .vscode/
 .idea/
+.codebuddy/
 
 pnpm-lock.yaml
 
