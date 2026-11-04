@@ -31,7 +31,16 @@ const {
   verifyFileRecord,
   isDigest,
 } = require('./storage');
-const { hashPassword, comparePassword, signToken, signDownloadToken, signSharePass, verifySharePass } = require('./utils/security');
+const {
+  hashPassword,
+  comparePassword,
+  signToken,
+  signDownloadToken,
+  signSharePass,
+  verifySharePass,
+  encryptShareToken,
+  decryptShareToken,
+} = require('./utils/security');
 const { authRequired, apiTokenRequired, downloadAuthRequired, hashApiToken } = require('./middleware/auth');
 const { initializeMailer } = require('./utils/mailer');
 const { getOrCreateThumbnail, removeThumbnail } = require('./thumbnail');
@@ -1216,6 +1225,17 @@ app.get('/n_file_system_api/access/:token', serveAccessLink);
 
 const SHARE_EXPIRY_DAYS = [1, 7, 30];
 
+// 把旧版本遗留的明文分享链接逐条转为加密存储（幂等，可重复执行）。
+async function migrateShareTokenEncryption() {
+  const legacyRows = await all("SELECT id, token FROM shares WHERE token IS NOT NULL AND token NOT LIKE 'v1.%'");
+  for (const row of legacyRows) {
+    await run('UPDATE shares SET token = ? WHERE id = ?', [encryptShareToken(row.token), row.id]);
+  }
+  if (legacyRows.length) {
+    console.log(`已将 ${legacyRows.length} 条历史分享链接转为加密存储`);
+  }
+}
+
 function parseShareExpiry(value) {
   if (value === undefined || value === null || value === '' || value === 'never') return null;
   const days = Number(value);
@@ -1325,7 +1345,7 @@ app.post('/drive/share', authRequired, asyncRoute(async (req, res) => {
   const result = await run(
     `INSERT INTO shares(user_id, item_type, file_id, folder_id, token, token_hash, passcode_hash, expires_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [req.user.id, type, type === 'file' ? id : null, type === 'folder' ? id : null, token, hashApiToken(token), passcodeHash, expiresAt]
+    [req.user.id, type, type === 'file' ? id : null, type === 'folder' ? id : null, encryptShareToken(token), hashApiToken(token), passcodeHash, expiresAt]
   );
   addLog({ userId: req.user.id, action: 'share_create', targetType: type, targetId: id, detail: JSON.stringify({ shareId: result.lastID, expiresAt, hasPasscode: Boolean(passcode) }) }, req);
   res.json({
@@ -1357,6 +1377,7 @@ app.get('/drive/shares', authRequired, asyncRoute(async (req, res) => {
     if (row.revoked_at) status = 'revoked';
     else if (row.name === null) status = 'gone';
     else if (row.expires_at && new Date(row.expires_at).getTime() <= now) status = 'expired';
+    const token = decryptShareToken(row.token);
     return {
       id: row.id,
       itemType: row.item_type,
@@ -1366,8 +1387,8 @@ app.get('/drive/shares', authRequired, asyncRoute(async (req, res) => {
       expiresAt: row.expires_at,
       useCount: row.use_count,
       hasPasscode: Boolean(row.passcode_hash),
-      token: row.token || null,
-      path: row.token ? `/share/${row.token}` : null,
+      token,
+      path: token ? `/share/${token}` : null,
       status,
     };
   });
@@ -1379,7 +1400,7 @@ app.post('/drive/share/:id/reset', authRequired, asyncRoute(async (req, res) => 
   const share = await get('SELECT id FROM shares WHERE id = ? AND user_id = ?', [id, req.user.id]);
   if (!share) throw new HttpError(404, '分享不存在');
   const token = randomToken('nfs_sh');
-  await run('UPDATE shares SET token = ?, token_hash = ? WHERE id = ?', [token, hashApiToken(token), id]);
+  await run('UPDATE shares SET token = ?, token_hash = ? WHERE id = ?', [encryptShareToken(token), hashApiToken(token), id]);
   addLog({ userId: req.user.id, action: 'share_reset', targetType: 'share', targetId: id }, req);
   res.json({ message: '链接已重置，旧链接立即失效', token, path: `/share/${token}` });
 }));
@@ -2163,6 +2184,7 @@ async function bootstrap(port = PORT) {
   await initializeMailer();
   await ensureStorageDirs();
   await initDb();
+  await migrateShareTokenEncryption();
   await cleanupVerificationChallenges();
   const staleCount = await cleanupStaleTempFiles(STALE_TEMP_MAX_AGE_MS);
   const orphanCount = await garbageCollectUnreferencedFiles();
@@ -2222,4 +2244,5 @@ module.exports = {
   bootstrap,
   shutdown,
   garbageCollectUnreferencedFiles,
+  migrateShareTokenEncryption,
 };

@@ -1,4 +1,5 @@
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -64,6 +65,36 @@ function verifySharePass(token) {
   return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'], audience: 'share-pass' });
 }
 
+/**
+ * 分享链接的可逆加密存储：
+ * - 优先使用独立的 SHARE_TOKEN_SECRET，未配置时回退 JWT_SECRET 派生密钥；
+ * - AES-256-GCM，随机 IV + 认证标签，密文格式 v1.<iv>.<tag>.<密文>（base64url）。
+ * 数据库泄露时无法还原明文链接；管理页仍可由服务端解密后展示与复制。
+ */
+const SHARE_TOKEN_KEY = crypto.createHash('sha256')
+  .update(`share-token:${process.env.SHARE_TOKEN_SECRET || JWT_SECRET}`)
+  .digest();
+
+function encryptShareToken(value) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', SHARE_TOKEN_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()]);
+  return ['v1', iv.toString('base64url'), cipher.getAuthTag().toString('base64url'), encrypted.toString('base64url')].join('.');
+}
+
+function decryptShareToken(value) {
+  if (typeof value !== 'string' || !value.startsWith('v1.')) return null;
+  const [version, ivPart, tagPart, dataPart] = value.split('.');
+  if (version !== 'v1' || !ivPart || !tagPart || !dataPart) return null;
+  try {
+    const decipher = crypto.createDecipheriv('aes-256-gcm', SHARE_TOKEN_KEY, Buffer.from(ivPart, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
+    return Buffer.concat([decipher.update(Buffer.from(dataPart, 'base64url')), decipher.final()]).toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   hashPassword,
   comparePassword,
@@ -73,4 +104,6 @@ module.exports = {
   verifyDownloadToken,
   signSharePass,
   verifySharePass,
+  encryptShareToken,
+  decryptShareToken,
 };

@@ -131,7 +131,7 @@ test('非基线数据库会拒绝启动', async () => {
   assert.match(result.stderr, /数据库不是当前基线版本/);
 });
 
-test('v3 数据库升级到 v4 并补齐分享链接列', async () => {
+test('版本号回退且已含 token 列的数据库可正常启动', async () => {
   const migrateDir = path.join(testRoot, 'v3-schema');
   await fs.promises.mkdir(migrateDir, { recursive: true });
   const migratePath = path.join(migrateDir, 'app.db');
@@ -141,7 +141,7 @@ test('v3 数据库升级到 v4 并补齐分享链接列', async () => {
       CREATE TABLE files(id INTEGER PRIMARY KEY, sha256 TEXT, size INTEGER, mime_type TEXT, created_at TEXT, unreferenced_at TEXT);
       CREATE TABLE shares(
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, item_type TEXT,
-        file_id INTEGER, folder_id INTEGER, token_hash TEXT, passcode_hash TEXT,
+        file_id INTEGER, folder_id INTEGER, token TEXT, token_hash TEXT, passcode_hash TEXT,
         expires_at TEXT, use_count INTEGER DEFAULT 0, revoked_at TEXT, created_at TEXT
       );
       PRAGMA user_version = 3;
@@ -742,6 +742,10 @@ test('分享链接支持免登录访问、提取码与生命周期', async () =>
   const created = await api('/drive/share', { method: 'POST', token, body: { type: 'file', id: fileId, expiresIn: 7 } });
   assert.equal(created.response.status, 200);
   assert.match(created.data.path, /^\/share\/nfs_sh_/);
+  // 数据库中链接以密文保存，但接口返回明文供持有者使用
+  const storedToken = await dbModule.get('SELECT token FROM shares WHERE id = ?', [created.data.id]);
+  assert.match(storedToken.token, /^v1\./);
+  assert.equal(storedToken.token.includes(created.data.token), false);
 
   const visitor = await fetch(`${baseUrl}${created.data.path}`);
   assert.equal(visitor.status, 200);
@@ -861,6 +865,28 @@ test('文件夹分享支持子树浏览与越权拦截', async () => {
   assert.equal(reset.response.status, 200);
   const oldLink = await fetch(base);
   assert.equal(oldLink.status, 404);
+});
+
+test('历史明文分享链接会在迁移中转为密文', async () => {
+  const user = await dbModule.get('SELECT id FROM users WHERE name = ?', ['alice@example.com']);
+  const file = await dbModule.get('SELECT id FROM user_files WHERE user_id = ? AND deleted_at IS NULL LIMIT 1', [user.id]);
+  const legacyToken = 'nfs_sh_legacy_plain';
+  const legacyHash = crypto.createHash('sha256').update(legacyToken).digest('hex');
+  await dbModule.run(
+    "INSERT INTO shares(user_id, item_type, file_id, token, token_hash) VALUES (?, 'file', ?, ?, ?)",
+    [user.id, file.id, legacyToken, legacyHash]
+  );
+  assert.equal((await dbModule.get('SELECT token FROM shares WHERE token_hash = ?', [legacyHash])).token, legacyToken);
+
+  await appModule.migrateShareTokenEncryption();
+
+  const migrated = await dbModule.get('SELECT token FROM shares WHERE token_hash = ?', [legacyHash]);
+  assert.match(migrated.token, /^v1\./);
+  assert.equal(migrated.token.includes(legacyToken), false);
+  // 迁移后链接仍可按 hash 正常访问
+  const accessible = await fetch(`${baseUrl}/share/${legacyToken}`);
+  assert.equal(accessible.status, 200);
+  await dbModule.run('DELETE FROM shares WHERE token_hash = ?', [legacyHash]);
 });
 
 test('文件夹删除后可重建同名且活跃同名仍被拒绝', async () => {
