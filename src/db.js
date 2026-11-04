@@ -329,7 +329,7 @@ async function assertBaselineDatabase() {
     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
   `);
   if (version.user_version === 0 && tables.count === 0) return;
-  if (![1, 2, 3, 4].includes(version.user_version)) {
+  if (![1, 2, 3, 4, 5].includes(version.user_version)) {
     throw new Error('数据库不是当前基线版本，请清空 DATA_DIR 后重新启动');
   }
   const fileColumns = await rawAll('PRAGMA table_info(files)');
@@ -496,6 +496,17 @@ async function initDb() {
           created_at TEXT DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS invite_codes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          code TEXT NOT NULL UNIQUE,
+          created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          note TEXT,
+          expires_at TEXT,
+          used_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          used_at TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+
         CREATE TABLE IF NOT EXISTS shares (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -535,6 +546,7 @@ async function initDb() {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_api_tokens_integration_name ON api_tokens(integration_id, name);
         CREATE INDEX IF NOT EXISTS idx_access_links_token ON access_links(token_hash);
         CREATE INDEX IF NOT EXISTS idx_access_links_file ON access_links(user_file_id);
+        CREATE INDEX IF NOT EXISTS idx_invite_codes_creator ON invite_codes(created_by, used_by);
         CREATE INDEX IF NOT EXISTS idx_shares_user ON shares(user_id, revoked_at);
         CREATE INDEX IF NOT EXISTS idx_shares_file ON shares(file_id);
         CREATE INDEX IF NOT EXISTS idx_shares_folder ON shares(folder_id);
@@ -545,7 +557,7 @@ async function initDb() {
       `);
       await createIntegrityTriggers();
       await createSearchIndex();
-      await rawRun('PRAGMA user_version = 4');
+      await rawRun('PRAGMA user_version = 5');
       await rawRun('COMMIT');
     } catch (err) {
       await rawRun('ROLLBACK');

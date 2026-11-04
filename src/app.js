@@ -887,9 +887,45 @@ app.get('/healthz', asyncRoute(async (_req, res) => {
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-app.get('/auth/register-status', (_req, res) => {
-  res.json({ allowed: process.env.ALLOW_REGISTER === 'true' });
-});
+const INVITE_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function generateInviteCode() {
+  // 12 位 = 60 bit 熵，去掉易混淆字符；存储不带分隔符，展示时按 4-4-4 分组。
+  const bytes = crypto.randomBytes(12);
+  return Array.from(bytes, (byte) => INVITE_CODE_ALPHABET[byte % INVITE_CODE_ALPHABET.length]).join('');
+}
+
+function formatInviteCode(code) {
+  return String(code || '').replace(/^(.{4})(.{4})(.{4})$/, '$1-$2-$3');
+}
+
+function normalizeInviteCode(value) {
+  if (typeof value !== 'string') return null;
+  const code = value.trim().toUpperCase().replace(/[\s-]/g, '');
+  return /^[A-Z0-9]{12}$/.test(code) ? code : null;
+}
+
+async function findValidInvite(code, query = get) {
+  if (!code) return null;
+  const row = await query(`
+    SELECT id FROM invite_codes
+    WHERE code = ? AND used_by IS NULL AND (expires_at IS NULL OR expires_at > ?)
+  `, [code, new Date().toISOString()]);
+  return row || null;
+}
+
+app.get('/auth/register-status', asyncRoute(async (_req, res) => {
+  const row = await get('SELECT COUNT(*) AS total FROM users');
+  // 系统尚无用户时直接允许注册首个账号（避免冷启动死锁），之后一律需要邀请码。
+  res.json({ mode: row.total > 0 ? 'invite' : 'bootstrap' });
+}));
+
+app.post('/auth/invite/verify', authRateLimit, asyncRoute(async (req, res) => {
+  const body = getRequestBody(req);
+  const invite = await findValidInvite(normalizeInviteCode(body.code));
+  if (!invite) throw new HttpError(400, '邀请码无效或已被使用');
+  res.json({ message: '邀请码有效', valid: true });
+}));
 
 app.post('/auth/email-codes', authRateLimit, asyncRoute(async (req, res) => {
   const body = getRequestBody(req);
@@ -897,8 +933,11 @@ app.post('/auth/email-codes', authRateLimit, asyncRoute(async (req, res) => {
   const purpose = body.purpose;
   if (!email) throw new HttpError(400, '邮箱格式不合法');
   if (!['register', 'reset_password'].includes(purpose)) throw new HttpError(400, '验证码用途不合法');
-  if (purpose === 'register' && process.env.ALLOW_REGISTER !== 'true') {
-    throw new HttpError(403, '当前不允许注册');
+  if (purpose === 'register') {
+    const userCount = await get('SELECT COUNT(*) AS total FROM users');
+    if (userCount.total > 0 && !(await findValidInvite(normalizeInviteCode(body.inviteCode)))) {
+      throw new HttpError(403, '邀请码无效或已被使用');
+    }
   }
   const identity = await get(
     "SELECT user_id FROM user_identities WHERE provider = 'email' AND provider_subject = ?",
@@ -917,12 +956,12 @@ app.post('/auth/email-codes', authRateLimit, asyncRoute(async (req, res) => {
 }));
 
 app.post('/auth/register', authRateLimit, asyncRoute(async (req, res) => {
-  if (process.env.ALLOW_REGISTER !== 'true') throw new HttpError(403, '当前不允许注册');
   const body = getRequestBody(req);
   const email = normalizeEmail(body.email);
   if (!email) throw new HttpError(400, '邮箱格式不合法');
   const password = getPassword(body.password);
   const code = getVerificationCode(body.code);
+  const inviteCode = normalizeInviteCode(body.inviteCode);
   const hashed = await hashPassword(password);
   const userId = await consumeVerificationCode({ email, purpose: 'register', code }, async (tx) => {
     const existing = await tx.get(
@@ -930,17 +969,27 @@ app.post('/auth/register', authRateLimit, asyncRoute(async (req, res) => {
       [email]
     );
     if (existing) throw new HttpError(409, '该邮箱已注册');
+    // 首个账号（系统无用户）可直接注册，此后每次注册都需要消耗一枚有效邀请码。
+    const before = await tx.get('SELECT COUNT(*) AS total FROM users');
     const result = await tx.run(
       'INSERT INTO users(name, password, credential_version) VALUES (?, ?, 1)',
       [email, hashed]
     );
+    if (before.total > 0) {
+      if (!inviteCode) throw new HttpError(400, '请填写邀请码');
+      const consumed = await tx.run(`
+        UPDATE invite_codes SET used_by = ?, used_at = ?
+        WHERE code = ? AND used_by IS NULL AND (expires_at IS NULL OR expires_at > ?)
+      `, [result.lastID, new Date().toISOString(), inviteCode, new Date().toISOString()]);
+      if (!consumed.changes) throw new HttpError(400, '邀请码无效或已被使用');
+    }
     await tx.run(
       "INSERT INTO user_identities(user_id, provider, provider_subject, verified_at) VALUES (?, 'email', ?, datetime('now'))",
       [result.lastID, email]
     );
     return result.lastID;
   });
-  addLog({ userId, action: 'register', targetType: 'user', targetId: userId }, req);
+  addLog({ userId, action: 'register', targetType: 'user', targetId: userId, detail: JSON.stringify({ invited: Boolean(inviteCode) }) }, req);
   res.status(201).json({ message: '注册成功，请登录' });
 }));
 
@@ -1317,6 +1366,55 @@ async function resolveSharedFile(req, token, fileId) {
     return { share, file };
   });
 }
+
+app.post('/drive/invite-codes', authRequired, asyncRoute(async (req, res) => {
+  const body = getRequestBody(req);
+  const note = typeof body.note === 'string' ? body.note.trim().slice(0, 64) : '';
+  const expiresAt = parseShareExpiry(body.expiresIn);
+  const code = generateInviteCode();
+  const result = await run(
+    'INSERT INTO invite_codes(code, created_by, note, expires_at) VALUES (?, ?, ?, ?)',
+    [code, req.user.id, note || null, expiresAt]
+  );
+  addLog({ userId: req.user.id, action: 'invite_create', targetType: 'invite', targetId: result.lastID }, req);
+  res.json({ message: '邀请码已生成', id: result.lastID, code, formatted: formatInviteCode(code), expiresAt, note: note || null });
+}));
+
+app.get('/drive/invite-codes', authRequired, asyncRoute(async (req, res) => {
+  const rows = await all(`
+    SELECT ic.id, ic.code, ic.note, ic.expires_at, ic.used_at, ic.created_at, u.name AS used_by_name
+    FROM invite_codes ic
+    LEFT JOIN users u ON u.id = ic.used_by
+    WHERE ic.created_by = ?
+    ORDER BY ic.id DESC
+  `, [req.user.id]);
+  const now = Date.now();
+  const items = rows.map((row) => {
+    let status = 'active';
+    if (row.used_at) status = 'used';
+    else if (row.expires_at && new Date(row.expires_at).getTime() <= now) status = 'expired';
+    return {
+      id: row.id,
+      code: row.code,
+      formatted: formatInviteCode(row.code),
+      note: row.note,
+      expiresAt: row.expires_at,
+      usedAt: row.used_at,
+      usedByName: row.used_by_name,
+      createdAt: row.created_at,
+      status,
+    };
+  });
+  res.json({ items });
+}));
+
+app.delete('/drive/invite-codes/:id', authRequired, asyncRoute(async (req, res) => {
+  const id = parseRequiredId(req.params.id, 'id');
+  const result = await run('DELETE FROM invite_codes WHERE id = ? AND created_by = ? AND used_by IS NULL', [id, req.user.id]);
+  if (!result.changes) throw new HttpError(404, '邀请码不存在或已被使用');
+  addLog({ userId: req.user.id, action: 'invite_delete', targetType: 'invite', targetId: id }, req);
+  res.json({ message: '邀请码已删除' });
+}));
 
 app.post('/drive/share', authRequired, asyncRoute(async (req, res) => {
   const body = getRequestBody(req);

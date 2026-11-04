@@ -32,6 +32,15 @@ export function mountAuth(root, onAuthenticated) {
           <button type="button" class="auth-link" data-forgot>忘记密码？</button>
           <button class="primary-button auth-submit" type="submit">登录</button>
         </form>
+        <form class="auth-form hidden" data-form="invite">
+          <button type="button" class="auth-link auth-back" data-invite-back>返回登录</button>
+          <div class="field-group">
+            <label class="field-label" for="invite-code">邀请码</label>
+            <input class="text-field" id="invite-code" name="inviteCode" maxlength="14" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX" required>
+            <p class="field-hint">注册需要邀请码，请向已注册的朋友索取</p>
+          </div>
+          <button class="primary-button auth-submit" type="submit">继续注册</button>
+        </form>
         <form class="auth-form hidden" data-form="register">
           <div class="field-group">
             <label class="field-label" for="register-email">邮箱</label>
@@ -83,6 +92,8 @@ export function mountAuth(root, onAuthenticated) {
 
   const message = root.querySelector('.form-message');
   const tabs = root.querySelector('[data-auth-tabs]');
+  let registerMode = 'invite';
+  let verifiedInviteCode = '';
   const showMessage = (text, type = '') => {
     message.textContent = text;
     message.className = `form-message ${type}`;
@@ -90,17 +101,23 @@ export function mountAuth(root, onAuthenticated) {
   const showForm = (name) => {
     tabs.classList.toggle('hidden', name === 'reset');
     root.querySelectorAll('[data-form]').forEach((form) => form.classList.toggle('hidden', form.dataset.form !== name));
-    root.querySelectorAll('[data-tab]').forEach((item) => item.classList.toggle('active', item.dataset.tab === name));
+    root.querySelectorAll('[data-tab]').forEach((item) => {
+      item.classList.toggle('active', item.dataset.tab === name || (name === 'invite' && item.dataset.tab === 'register'));
+    });
     showMessage('');
   };
 
-  root.querySelectorAll('[data-tab]').forEach((button) => button.addEventListener('click', () => showForm(button.dataset.tab)));
+  root.querySelectorAll('[data-tab]').forEach((button) => button.addEventListener('click', () => {
+    if (button.dataset.tab === 'register' && registerMode === 'invite') showForm('invite');
+    else showForm(button.dataset.tab);
+  }));
   root.querySelector('[data-forgot]').addEventListener('click', () => {
     const loginEmail = root.querySelector('[data-form="login"] [name="email"]').value;
     root.querySelector('[data-form="reset"] [name="email"]').value = loginEmail;
     showForm('reset');
   });
   root.querySelector('[data-back-login]').addEventListener('click', () => showForm('login'));
+  root.querySelector('[data-invite-back]').addEventListener('click', () => showForm('login'));
 
   root.querySelectorAll('.password-toggle').forEach((button) => {
     button.addEventListener('click', () => {
@@ -123,7 +140,9 @@ export function mountAuth(root, onAuthenticated) {
       button.disabled = true;
       showMessage('正在发送验证码...');
       try {
-        const data = await request('/auth/email-codes', { method: 'POST', auth: false, body: { email, purpose } });
+        const body = { email, purpose };
+        if (purpose === 'register' && verifiedInviteCode) body.inviteCode = verifiedInviteCode;
+        const data = await request('/auth/email-codes', { method: 'POST', auth: false, body });
         showMessage(data.message, 'success');
         let remaining = 60;
         button.textContent = `${remaining} 秒后重发`;
@@ -163,6 +182,25 @@ export function mountAuth(root, onAuthenticated) {
     }
   });
 
+  root.querySelector('[data-form="invite"]').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = form.querySelector('[type="submit"]');
+    submit.disabled = true;
+    showMessage('正在验证邀请码...');
+    try {
+      const code = form.elements.inviteCode.value.trim();
+      await request('/auth/invite/verify', { method: 'POST', auth: false, body: { code } });
+      verifiedInviteCode = code;
+      showForm('register');
+      showMessage('邀请码有效，请继续完成注册', 'success');
+    } catch (error) {
+      showMessage(error.message || '邀请码无效', 'error');
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
   root.querySelector('[data-form="register"]').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -174,11 +212,15 @@ export function mountAuth(root, onAuthenticated) {
     submit.disabled = true;
     showMessage('正在注册...');
     try {
-      await request('/auth/register', {
-        method: 'POST', auth: false,
-        body: { email: form.elements.email.value.trim(), code: form.elements.code.value.trim(), password: form.elements.password.value },
-      });
-      root.querySelector('[data-form="login"] [name="email"]').value = form.elements.email.value.trim();
+      const payload = {
+        email: form.elements.email.value.trim(),
+        code: form.elements.code.value.trim(),
+        password: form.elements.password.value,
+      };
+      if (verifiedInviteCode) payload.inviteCode = verifiedInviteCode;
+      await request('/auth/register', { method: 'POST', auth: false, body: payload });
+      verifiedInviteCode = '';
+      root.querySelector('[data-form="login"] [name="email"]').value = payload.email;
       showForm('login');
       showMessage('注册成功，请登录', 'success');
     } catch (error) {
@@ -215,7 +257,7 @@ export function mountAuth(root, onAuthenticated) {
 
   request('/auth/register-status', { auth: false })
     .then((data) => {
-      if (!data.allowed) root.querySelector('#register-tab').classList.add('hidden');
+      registerMode = data.mode === 'bootstrap' ? 'bootstrap' : 'invite';
     })
     .catch(() => {});
 }

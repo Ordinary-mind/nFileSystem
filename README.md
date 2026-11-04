@@ -37,7 +37,7 @@ npm start
 
 默认地址为 `http://localhost:6001`。开发模式使用 `npm run dev`。
 
-新安装时，先在 `.env` 中将 `ALLOW_REGISTER` 临时设为 `true`，启动后注册首个账号；注册完成再设回 `false` 并重启。模板默认关闭注册，系统不会自动创建账号。
+注册采用邀请码制：首次部署时系统还没有用户，可直接注册首个账号；此后注册必须填写邀请码。已登录用户在「我的 - 邀请码」中生成邀请码（一次性，可选 7/30 天有效期）发给朋友，朋友在注册页先验证邀请码，再进入邮箱注册流程。无需再修改环境变量或重启服务。
 
 ## 配置
 
@@ -49,7 +49,7 @@ npm start
 | `JWT_SECRET` | JWT 签名密钥，至少 32 字节 | 必填 |
 | `AUTH_CODE_SECRET` | 邮箱验证码 HMAC 密钥，至少 32 字节 | 必填 |
 | `TOKEN_EXPIRES_IN` | 登录 Token 有效期 | `7d` |
-| `ALLOW_REGISTER` | 是否开放注册 | `false` |
+| `SHARE_TOKEN_SECRET` | 分享链接可逆加密密钥，未配置时回退 `JWT_SECRET` | 空 |
 | `SMTP_HOST` / `SMTP_PORT` | SMTP 服务 | 空 / `587` |
 | `SMTP_SECURE` | 是否直接使用 TLS | `false` |
 | `SMTP_USER` / `SMTP_PASS` | SMTP 认证 | 空 |

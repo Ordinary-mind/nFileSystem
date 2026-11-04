@@ -237,5 +237,12 @@ test('分享功能前后端接线完整且公开端点有限流', () => {
   assert.match(profileSource, /\/drive\/shares/);
   assert.match(profileSource, /data-copy-share/);
   assert.match(profileSource, /data-delete/);
+
+  const authSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'views', 'auth.js'), 'utf8');
+  assert.match(authSource, /data-form="invite"/);
+  assert.match(authSource, /\/auth\/invite\/verify/);
+  assert.match(authSource, /registerMode === 'invite'/);
+  assert.match(profileSource, /data-invite-manager/);
+  assert.match(profileSource, /\/drive\/invite-codes/);
   assert.match(shareViewSource, /\/share\/\$\{encodedToken\}\/verify/);
 });

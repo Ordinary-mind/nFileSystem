@@ -47,9 +47,11 @@ async function api(urlPath, options = {}) {
   return { response, data };
 }
 
-async function requestCode(email, purpose) {
+async function requestCode(email, purpose, inviteCode) {
   mailerModule.clearTestOutbox();
-  const requested = await api('/auth/email-codes', { method: 'POST', body: { email, purpose } });
+  const body = { email, purpose };
+  if (inviteCode) body.inviteCode = inviteCode;
+  const requested = await api('/auth/email-codes', { method: 'POST', body });
   assert.equal(requested.response.status, 202);
   const outbox = mailerModule.getTestOutbox();
   assert.equal(outbox.length, 1);
@@ -58,8 +60,18 @@ async function requestCode(email, purpose) {
 
 async function registerAndLogin(label, password = 'password-123') {
   const email = `${label}@example.com`;
-  const code = await requestCode(email, 'register');
-  const registration = await api('/auth/register', { method: 'POST', body: { email, password, code } });
+  // 已有用户后注册必须消耗邀请码：测试内直接落库生成一枚。
+  let inviteCode;
+  const userCount = await dbModule.get('SELECT COUNT(*) AS total FROM users');
+  if (userCount.total > 0) {
+    const inviter = await dbModule.get('SELECT id FROM users ORDER BY id LIMIT 1');
+    inviteCode = crypto.randomBytes(8).toString('hex').slice(0, 12).toUpperCase();
+    await dbModule.run('INSERT INTO invite_codes(code, created_by) VALUES (?, ?)', [inviteCode, inviter.id]);
+  }
+  const code = await requestCode(email, 'register', inviteCode);
+  const body = { email, password, code };
+  if (inviteCode) body.inviteCode = inviteCode;
+  const registration = await api('/auth/register', { method: 'POST', body });
   assert.equal(registration.response.status, 201);
   const login = await api('/auth/login', { method: 'POST', body: { email, password } });
   assert.equal(login.response.status, 200);
@@ -109,7 +121,7 @@ after(async () => {
 
 test('数据库使用 SHA-256 基线结构', async () => {
   const version = await dbModule.get('PRAGMA user_version');
-  assert.equal(version.user_version, 4);
+  assert.equal(version.user_version, 5);
   const columns = await dbModule.all('PRAGMA table_info(files)');
   assert.deepEqual(columns.map((column) => column.name), ['id', 'sha256', 'size', 'mime_type', 'created_at', 'unreferenced_at']);
   await assert.rejects(
@@ -214,8 +226,9 @@ test('邮箱注册、重置密码和修改密码形成完整安全闭环', async
 
   mailerModule.clearTestOutbox();
   await dbModule.run('UPDATE verification_challenges SET sent_at = 0 WHERE provider_subject = ?', [email]);
+  const inviteForDuplicate = await api('/drive/invite-codes', { method: 'POST', token: firstToken, body: {} });
   const duplicateCode = await api('/auth/email-codes', {
-    method: 'POST', body: { email, purpose: 'register' },
+    method: 'POST', body: { email, purpose: 'register', inviteCode: inviteForDuplicate.data.code },
   });
   assert.equal(duplicateCode.response.status, 202);
   assert.equal(mailerModule.getTestOutbox().length, 0);
@@ -265,11 +278,14 @@ test('邮箱注册、重置密码和修改密码形成完整安全闭环', async
 
 test('邮箱验证码连续错误五次后锁定', async () => {
   const email = 'locked@example.com';
-  const code = await requestCode(email, 'register');
+  const inviter = await dbModule.get('SELECT id FROM users ORDER BY id LIMIT 1');
+  const inviteCode = crypto.randomBytes(8).toString('hex').slice(0, 12).toUpperCase();
+  await dbModule.run('INSERT INTO invite_codes(code, created_by) VALUES (?, ?)', [inviteCode, inviter.id]);
+  const code = await requestCode(email, 'register', inviteCode);
   const wrongCode = code === '999999' ? '999998' : '999999';
   for (let attempt = 0; attempt < 5; attempt++) {
     const rejected = await api('/auth/register', {
-      method: 'POST', body: { email, password: 'password-123', code: wrongCode },
+      method: 'POST', body: { email, password: 'password-123', code: wrongCode, inviteCode },
     });
     assert.equal(rejected.response.status, 400);
   }
@@ -279,9 +295,12 @@ test('邮箱验证码连续错误五次后锁定', async () => {
   );
   assert.deepEqual(locked, { attempts: 5, status: 'locked' });
   const correctAfterLock = await api('/auth/register', {
-    method: 'POST', body: { email, password: 'password-123', code },
+    method: 'POST', body: { email, password: 'password-123', code, inviteCode },
   });
   assert.equal(correctAfterLock.response.status, 400);
+  // 验证码校验失败不应消耗邀请码
+  const unusedInvite = await dbModule.get('SELECT used_by FROM invite_codes WHERE code = ?', [inviteCode]);
+  assert.equal(unusedInvite.used_by, null);
 });
 
 test('秒传不能通过其他用户的 SHA-256 取得文件', async () => {
@@ -680,22 +699,62 @@ test('写事务执行期间只读查询仍可完成', async () => {
   }
 });
 
-test('关闭注册时禁止注册验证码但保留密码找回入口', async () => {
-  process.env.ALLOW_REGISTER = 'false';
-  try {
-    const registerCode = await api('/auth/email-codes', {
-      method: 'POST', body: { email: 'closed@example.com', purpose: 'register' },
-    });
-    assert.equal(registerCode.response.status, 403);
-    mailerModule.clearTestOutbox();
-    const resetCode = await api('/auth/email-codes', {
-      method: 'POST', body: { email: 'nobody@example.com', purpose: 'reset_password' },
-    });
-    assert.equal(resetCode.response.status, 202);
-    assert.equal(mailerModule.getTestOutbox().length, 0);
-  } finally {
-    process.env.ALLOW_REGISTER = 'true';
-  }
+test('邀请码注册流程与注册验证码校验', async () => {
+  // 已有用户时，未携带邀请码不能发送注册验证码
+  const blocked = await api('/auth/email-codes', {
+    method: 'POST', body: { email: 'invite-blocked@example.com', purpose: 'register' },
+  });
+  assert.equal(blocked.response.status, 403);
+
+  // 密码找回不受影响
+  mailerModule.clearTestOutbox();
+  const resetCode = await api('/auth/email-codes', {
+    method: 'POST', body: { email: 'nobody@example.com', purpose: 'reset_password' },
+  });
+  assert.equal(resetCode.response.status, 202);
+  assert.equal(mailerModule.getTestOutbox().length, 0);
+
+  // 已登录用户可以生成邀请码
+  const inviter = await registerAndLogin(`inviter-${crypto.randomUUID()}`);
+  const created = await api('/drive/invite-codes', {
+    method: 'POST', token: inviter, body: { note: '给朋友', expiresIn: 7 },
+  });
+  assert.equal(created.response.status, 200);
+  assert.match(created.data.formatted, /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+
+  // 邀请码校验：有效与无效
+  assert.equal((await api('/auth/invite/verify', { method: 'POST', body: { code: created.data.code } })).response.status, 200);
+  assert.equal((await api('/auth/invite/verify', { method: 'POST', body: { code: 'AAAABBBBCCCC' } })).response.status, 400);
+
+  // 携带邀请码完成注册，邀请码被原子消耗
+  const email = `invited-${crypto.randomUUID()}@example.com`;
+  const code = await requestCode(email, 'register', created.data.code);
+  const registered = await api('/auth/register', {
+    method: 'POST', body: { email, password: 'password-123', code, inviteCode: created.data.code },
+  });
+  assert.equal(registered.response.status, 201);
+  const used = await dbModule.get('SELECT used_by, used_at FROM invite_codes WHERE code = ?', [created.data.code]);
+  assert.ok(used.used_by);
+  assert.ok(used.used_at);
+
+  // 同一邀请码不能再次使用
+  const secondEmail = `invited2-${crypto.randomUUID()}@example.com`;
+  const secondRequest = await api('/auth/email-codes', {
+    method: 'POST', body: { email: secondEmail, purpose: 'register', inviteCode: created.data.code },
+  });
+  assert.equal(secondRequest.response.status, 403);
+
+  // 列表状态与删除未使用的邀请码
+  const list = await api('/drive/invite-codes', { token: inviter });
+  assert.equal(list.data.items.find((item) => item.id === created.data.id).status, 'used');
+  const fresh = await api('/drive/invite-codes', { method: 'POST', token: inviter, body: {} });
+  assert.equal((await api(`/drive/invite-codes/${fresh.data.id}`, { method: 'DELETE', token: inviter })).response.status, 200);
+  assert.equal((await api(`/drive/invite-codes/${created.data.id}`, { method: 'DELETE', token: inviter })).response.status, 404);
+
+  // 过期邀请码不可用
+  const expiring = await api('/drive/invite-codes', { method: 'POST', token: inviter, body: { expiresIn: 7 } });
+  await dbModule.run("UPDATE invite_codes SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [expiring.data.id]);
+  assert.equal((await api('/auth/invite/verify', { method: 'POST', body: { code: expiring.data.code } })).response.status, 400);
 });
 
 test('移动与重命名不受回收站中同名文件阻塞', async () => {
