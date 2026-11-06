@@ -66,6 +66,18 @@ function verifySharePass(token) {
 }
 
 /**
+ * 接入应用授权登录的访问令牌：只用于博客等外部系统在登录瞬间读取用户身份，
+ * audience 绑定 oauth-app，避免与文件系统登录 token 混用。
+ */
+function signOAuthAccessToken(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '1h', algorithm: 'HS256', audience: 'oauth-app' });
+}
+
+function verifyOAuthAccessToken(token) {
+  return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'], audience: 'oauth-app' });
+}
+
+/**
  * 分享链接的可逆加密存储：
  * - 优先使用独立的 SHARE_TOKEN_SECRET，未配置时回退 JWT_SECRET 派生密钥；
  * - AES-256-GCM，随机 IV + 认证标签，密文格式 v1.<iv>.<tag>.<密文>（base64url）。
@@ -104,6 +116,8 @@ module.exports = {
   verifyDownloadToken,
   signSharePass,
   verifySharePass,
+  signOAuthAccessToken,
+  verifyOAuthAccessToken,
   encryptShareToken,
   decryptShareToken,
 };

@@ -51,6 +51,7 @@ export function scopeLabel(scope) {
     'files:read': '读取列表',
     'files:delete': '删除文件',
     'links:create': '创建链接',
+    'user:read': '读取账号身份',
   };
   return labels[scope] || scope;
 }

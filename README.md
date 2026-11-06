@@ -11,6 +11,7 @@
 - SHA-256 内容寻址与物理去重，同一内容只保留一份物理副本
 - 用户权限隔离、配额、磁盘低水位、上传并发限制和分级限流
 - 接入应用、独立 API Token、目录隔离和可控访问链接
+- 接入应用 OAuth2 授权登录（授权码模式），外部系统无需接触用户密码
 - 回收站（恢复与永久删除）、SQLite WAL、事务、存储校验和孤儿文件清理
 
 ## 运行边界
@@ -19,7 +20,7 @@
 
 持久化目录应放在可靠的本地块存储或本机文件系统上，不要直接放在无法保证 SQLite 文件锁、原子重命名和目录同步语义的网络文件系统上。
 
-这是 SHA-256 基线版本，不提供旧 MD5 数据库、API 或物理路径迁移。启动时会自动把 v1～v4 数据库逐步升级到当前 v5（补充回收站、分享链接与邀请码结构），重复启动安全；结构不匹配或版本未知的数据库会被拒绝。全新部署应使用空的 `data/` 和 `uploads/`。
+这是 SHA-256 基线版本，不提供旧 MD5 数据库、API 或物理路径迁移。启动时会自动把 v1～v5 数据库逐步升级到当前 v6（补充回收站、分享链接、邀请码与 OAuth 授权码结构），重复启动安全；结构不匹配或版本未知的数据库会被拒绝。全新部署应使用空的 `data/` 和 `uploads/`。
 
 ## 快速开始
 
@@ -241,6 +242,44 @@ N-File-Token: <api-token>
 ```text
 /n_file_system_api/access/:token
 ```
+
+## 接入应用 OAuth2 授权登录
+
+除 API Token 之外，接入应用还可以作为 OAuth2 客户端，让外部系统（例如博客）复用本系统的注册与登录，而无需接触用户密码。采用授权码模式：
+
+1. 在「应用」页新建接入应用，勾选需要的权限（授权登录需要 `user:read`），并填写授权回跳地址（每行一个，必须 HTTPS，本机调试可用 `localhost` 的 HTTP）。
+2. 创建成功后会一次性显示 `client_id` 与 `client_secret`，请立即写入外部系统配置；`client_secret` 只保存 sha256 摘要，之后无法再次查看，可在应用详情页「重置凭证」重新生成（旧凭证立即失效）。
+3. 外部系统把用户浏览器重定向到授权页：
+
+```text
+/oauth/authorize?client_id=<client_id>&redirect_uri=<redirect_uri>&scope=user:read&state=<state>
+```
+
+4. 用户在授权页确认后，浏览器回到 `redirect_uri?code=<code>&state=<state>`；授权码 10 分钟有效、只能使用一次。
+5. 外部系统在服务端用 `client_id` + `client_secret` 换取访问令牌：
+
+```http
+POST /api/v1/oauth/token
+Content-Type: application/json
+
+{ "grant_type": "authorization_code", "code": "<code>", "client_id": "<client_id>", "client_secret": "<client_secret>", "redirect_uri": "<redirect_uri>" }
+```
+
+响应包含 `access_token`（JWT，`audience=oauth-app`，有效期 1 小时）、`scope` 与 `user: { id, email }`。随后可用该令牌读取用户信息：
+
+```http
+GET /api/v1/oauth/userinfo
+Authorization: Bearer <access_token>
+```
+
+该接口需要 `user:read` 权限，返回 `{ id, email, name }`，其中 `name` 为邮箱前缀，仅作为默认昵称参考，外部系统应自行维护昵称、头像等资料。
+
+安全约定：
+
+- `redirect_uri` 必须与登记值完全一致，不做前缀或通配匹配
+- `client_secret` 使用常量时间比较，授权码只存哈希，日志不记录 code、secret 与 access token
+- 停用应用或重置凭证后，新授权立即失败；已签发的 access token 最长 1 小时后自然过期
+- 本系统不提供 CORS，令牌交换必须由外部系统的服务端发起
 
 ## 备份和校验
 

@@ -329,7 +329,7 @@ async function assertBaselineDatabase() {
     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
   `);
   if (version.user_version === 0 && tables.count === 0) return;
-  if (![1, 2, 3, 4, 5].includes(version.user_version)) {
+  if (![1, 2, 3, 4, 5, 6].includes(version.user_version)) {
     throw new Error('数据库不是当前基线版本，请清空 DATA_DIR 后重新启动');
   }
   const fileColumns = await rawAll('PRAGMA table_info(files)');
@@ -527,8 +527,35 @@ async function initDb() {
         );
       `);
 
+      // v6：接入应用支持 OAuth2 授权码登录。列与表全部按存在性判断，重复启动幂等。
+      const integrationColumns = await rawAll('PRAGMA table_info(integrations)');
+      const addIntegrationColumn = async (columnName, definition) => {
+        if (!integrationColumns.some((column) => column.name === columnName)) {
+          await rawExec(`ALTER TABLE integrations ADD COLUMN ${columnName} ${definition};`);
+        }
+      };
+      await addIntegrationColumn('client_id', 'TEXT');
+      await addIntegrationColumn('client_secret_hash', 'TEXT');
+      await addIntegrationColumn('redirect_uris', 'TEXT');
+
+      await rawExec(`
+        CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          code_hash TEXT NOT NULL UNIQUE,
+          integration_id INTEGER NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          redirect_uri TEXT NOT NULL,
+          scopes TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+
       await rawExec(`
         CREATE UNIQUE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_integrations_client_id ON integrations(client_id);
+        CREATE INDEX IF NOT EXISTS idx_oauth_codes_integration ON oauth_authorization_codes(integration_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_user_folders_list ON user_folders(user_id, parent_id, name);
         CREATE INDEX IF NOT EXISTS idx_user_files_list ON user_files(user_id, folder_id, id DESC);
         CREATE INDEX IF NOT EXISTS idx_user_files_duplicate ON user_files(user_id, folder_id, file_id, name);
@@ -557,7 +584,7 @@ async function initDb() {
       `);
       await createIntegrityTriggers();
       await createSearchIndex();
-      await rawRun('PRAGMA user_version = 5');
+      await rawRun('PRAGMA user_version = 6');
       await rawRun('COMMIT');
     } catch (err) {
       await rawRun('ROLLBACK');

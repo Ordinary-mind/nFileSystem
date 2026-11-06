@@ -38,10 +38,11 @@ const {
   signDownloadToken,
   signSharePass,
   verifySharePass,
+  signOAuthAccessToken,
   encryptShareToken,
   decryptShareToken,
 } = require('./utils/security');
-const { authRequired, apiTokenRequired, downloadAuthRequired, hashApiToken } = require('./middleware/auth');
+const { authRequired, apiTokenRequired, oauthAccessRequired, downloadAuthRequired, hashApiToken } = require('./middleware/auth');
 const { initializeMailer } = require('./utils/mailer');
 const { getOrCreateThumbnail, removeThumbnail } = require('./thumbnail');
 const {
@@ -684,10 +685,96 @@ function normalizeTokenName(name) {
   return value;
 }
 
+// ===== 接入应用 OAuth2 授权登录辅助函数 =====
+
+const OAUTH_CODE_TTL_MS = 10 * 60 * 1000;
+const MAX_REDIRECT_URIS = 5;
+
+function parseRedirectUris(value) {
+  const list = Array.isArray(value) ? value : String(value || '').split(/\r?\n/);
+  return [...new Set(list.map((item) => String(item).trim()).filter(Boolean))];
+}
+
+/**
+ * 回跳地址必须精确匹配，避免开放重定向：
+ * 只接受 HTTPS，本机调试允许 localhost / 127.0.0.1 / [::1] 的 HTTP，且不允许携带 hash。
+ */
+function normalizeRedirectUris(value) {
+  const list = parseRedirectUris(value);
+  if (list.length > MAX_REDIRECT_URIS) {
+    throw new HttpError(400, `回跳地址最多 ${MAX_REDIRECT_URIS} 个`);
+  }
+  for (const uri of list) {
+    let parsed;
+    try {
+      parsed = new URL(uri);
+    } catch {
+      throw new HttpError(400, `回跳地址不合法：${uri}`);
+    }
+    const isLocalHost = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLocalHost)) {
+      throw new HttpError(400, '回跳地址必须使用 HTTPS（本机调试可使用 localhost 的 HTTP 地址）');
+    }
+    if (parsed.hash) {
+      throw new HttpError(400, '回跳地址不能包含 hash 片段');
+    }
+  }
+  return list;
+}
+
+function hashMatchesSecret(secret, storedHash) {
+  if (typeof secret !== 'string' || !secret || typeof storedHash !== 'string' || !storedHash) return false;
+  try {
+    const actual = Buffer.from(hashApiToken(secret), 'hex');
+    const expected = Buffer.from(storedHash, 'hex');
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+function resolveRequestedScopes(requested, allowedText) {
+  const allowed = parseScopesForRoute(allowedText);
+  const raw = Array.isArray(requested) ? requested.join(',') : String(requested || '');
+  const values = raw.trim()
+    ? parseScopesForRoute(raw.replace(/\s+/g, ','))
+    : allowed;
+  const unique = [...new Set(values)];
+  if (!unique.length) throw new HttpError(400, 'scope 不能为空');
+  const invalid = unique.filter((scope) => !allowed.includes(scope));
+  if (invalid.length) throw new HttpError(400, `scope 不在应用权限内：${invalid.join('、')}`);
+  return unique;
+}
+
+async function loadOAuthClient(clientId) {
+  if (typeof clientId !== 'string' || !clientId.trim()) {
+    throw new HttpError(400, 'client_id 缺失');
+  }
+  const client = await get(
+    `SELECT id, user_id, name, scopes, enabled, client_id, client_secret_hash, redirect_uris
+     FROM integrations WHERE client_id = ?`,
+    [clientId.trim()]
+  );
+  if (!client || client.enabled !== 1) {
+    throw new HttpError(401, '接入应用不存在或已停用');
+  }
+  return client;
+}
+
+function assertRedirectUri(client, redirectUri) {
+  const value = typeof redirectUri === 'string' ? redirectUri.trim() : '';
+  if (!value) throw new HttpError(400, 'redirect_uri 缺失');
+  if (!parseRedirectUris(client.redirect_uris).includes(value)) {
+    throw new HttpError(400, 'redirect_uri 未在接入应用中登记');
+  }
+  return value;
+}
+
 app.get('/integrations', authRequired, async (req, res) => {
   try {
     const integrations = await all(
       `SELECT i.id, i.name, i.root_folder_id, i.scopes, i.enabled, i.created_at,
+              i.client_id, i.redirect_uris,
               f.name AS root_folder_name
        FROM integrations i
        LEFT JOIN user_folders f ON i.root_folder_id = f.id
@@ -695,7 +782,13 @@ app.get('/integrations', authRequired, async (req, res) => {
        ORDER BY i.id DESC`,
       [req.user.id]
     );
-    return res.json({ integrations });
+    return res.json({
+      integrations: integrations.map((item) => ({
+        ...item,
+        clientId: item.client_id || null,
+        redirectUris: parseRedirectUris(item.redirect_uris),
+      })),
+    });
   } catch (err) {
     return res.status(500).json({ message: '获取接入应用失败', error: err.message });
   }
@@ -703,10 +796,11 @@ app.get('/integrations', authRequired, async (req, res) => {
 
 app.post('/integrations', authRequired, async (req, res) => {
   try {
-    const { name, rootFolderName, rootFolderId, scopes, createToken = true } = req.body;
+    const { name, rootFolderName, rootFolderId, scopes, createToken = true, redirectUris } = req.body;
     if (!name || typeof name !== 'string' || name.length > 64) {
       return res.status(400).json({ message: '接入应用名称不合法' });
     }
+    const normalizedRedirects = normalizeRedirectUris(redirectUris);
 
     let appRootFolderId = rootFolderId || null;
     if (appRootFolderId) {
@@ -734,9 +828,13 @@ app.post('/integrations', authRequired, async (req, res) => {
     }
 
     const normalizedScopes = normalizeScopes(scopes, ['files:upload', 'files:read', 'files:delete', 'links:create']);
+    // OAuth 客户端凭证：client_secret 只保存 sha256，明文仅在创建响应中返回一次。
+    const clientId = randomToken('nfs_client');
+    const clientSecret = randomToken('nfs_cs');
     const result = await run(
-      'INSERT INTO integrations(user_id, name, root_folder_id, scopes) VALUES (?, ?, ?, ?)',
-      [req.user.id, name, appRootFolderId, normalizedScopes]
+      `INSERT INTO integrations(user_id, name, root_folder_id, scopes, client_id, client_secret_hash, redirect_uris)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [req.user.id, name, appRootFolderId, normalizedScopes, clientId, hashApiToken(clientSecret), normalizedRedirects.join('\n')]
     );
 
     let tokenInfo = null;
@@ -756,10 +854,18 @@ app.post('/integrations', authRequired, async (req, res) => {
         name,
         rootFolderId: appRootFolderId,
         scopes: normalizedScopes.split(','),
+        clientId,
+        redirectUris: normalizedRedirects,
       },
       token: tokenInfo,
+      oauth: {
+        clientId,
+        clientSecret,
+        redirectUris: normalizedRedirects,
+      },
     });
   } catch (err) {
+    if (err instanceof HttpError) return res.status(err.status).json({ message: err.message });
     return res.status(500).json({ message: '创建接入应用失败', error: err.message });
   }
 });
@@ -864,6 +970,24 @@ app.put('/integrations/:id', authRequired, async (req, res) => {
   }
 });
 
+// 重置 OAuth 客户端凭证：client_id 与 client_secret 同时更换，旧凭证立即失效。
+app.post('/integrations/:id/client', authRequired, asyncRoute(async (req, res) => {
+  const integration = await get('SELECT id, name FROM integrations WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+  if (!integration) throw new HttpError(404, '接入应用不存在');
+
+  const clientId = randomToken('nfs_client');
+  const clientSecret = randomToken('nfs_cs');
+  await run(
+    'UPDATE integrations SET client_id = ?, client_secret_hash = ? WHERE id = ? AND user_id = ?',
+    [clientId, hashApiToken(clientSecret), integration.id, req.user.id]
+  );
+  addLog({ userId: req.user.id, action: 'oauth_client_reset', targetType: 'integration', targetId: integration.id }, req);
+  return res.json({
+    message: '授权凭证已重置，请立即更新外部系统配置',
+    oauth: { clientId, clientSecret },
+  });
+}));
+
 app.delete('/integrations/:integrationId/tokens/:tokenId', authRequired, async (req, res) => {
   try {
     const { integrationId, tokenId } = req.params;
@@ -878,6 +1002,137 @@ app.delete('/integrations/:integrationId/tokens/:tokenId', authRequired, async (
   }
 });
 
+
+// ===== 接入应用 OAuth2 授权登录（授权码模式） =====
+
+const oauthAuthorizeHtml = path.join(__dirname, '..', 'public', 'oauth.html');
+
+app.get('/oauth/authorize', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.sendFile(oauthAuthorizeHtml, (err) => {
+    if (err && !res.headersSent) res.status(500).json({ message: '授权页加载失败' });
+  });
+});
+
+app.get('/oauth/authorize/context', authRequired, asyncRoute(async (req, res) => {
+  const client = await loadOAuthClient(String(req.query.client_id || ''));
+  const redirectUri = assertRedirectUri(client, String(req.query.redirect_uri || ''));
+  const scopes = resolveRequestedScopes(String(req.query.scope || ''), client.scopes);
+  const state = typeof req.query.state === 'string' ? req.query.state.slice(0, 256) : '';
+
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    app: { id: client.id, name: client.name },
+    scopes,
+    user: { id: req.user.id, email: req.user.email },
+    redirectUri,
+    state,
+  });
+}));
+
+app.post('/oauth/authorize', authRequired, authRateLimit, asyncRoute(async (req, res) => {
+  const body = getRequestBody(req);
+  const client = await loadOAuthClient(String(body.client_id || ''));
+  const redirectUri = assertRedirectUri(client, String(body.redirect_uri || ''));
+  const scopes = resolveRequestedScopes(String(body.scope || ''), client.scopes);
+  const state = typeof body.state === 'string' ? body.state.slice(0, 256) : '';
+
+  const target = new URL(redirectUri);
+  if (state) target.searchParams.set('state', state);
+
+  if (body.approve !== true) {
+    target.searchParams.set('error', 'access_denied');
+    return res.json({ redirectUrl: target.toString() });
+  }
+
+  const code = randomToken('nfs_code');
+  const expiresAt = new Date(Date.now() + OAUTH_CODE_TTL_MS).toISOString();
+  await run(
+    `INSERT INTO oauth_authorization_codes(code_hash, integration_id, user_id, redirect_uri, scopes, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [hashApiToken(code), client.id, req.user.id, redirectUri, scopes.join(','), expiresAt]
+  );
+  addLog({ userId: req.user.id, action: 'oauth_authorize', targetType: 'integration', targetId: client.id }, req);
+
+  target.searchParams.set('code', code);
+  res.set('Cache-Control', 'no-store');
+  return res.json({ redirectUrl: target.toString(), expiresAt });
+}));
+
+app.post('/api/v1/oauth/token', authRateLimit, asyncRoute(async (req, res) => {
+  const body = getRequestBody(req);
+  if (body.grant_type !== 'authorization_code') {
+    throw new HttpError(400, '仅支持 authorization_code 授权模式');
+  }
+  const code = typeof body.code === 'string' ? body.code.trim() : '';
+  if (!code) throw new HttpError(400, '授权码缺失');
+
+  const client = await loadOAuthClient(String(body.client_id || ''));
+  if (!hashMatchesSecret(body.client_secret, client.client_secret_hash)) {
+    throw new HttpError(401, 'client_secret 不正确');
+  }
+
+  // 授权码一次性使用：先条件更新 used_at，再读取记录，避免并发重放。
+  const codeHash = hashApiToken(code);
+  const codeRecord = await transaction(async (tx) => {
+    const record = await tx.get(
+      `SELECT id, integration_id, user_id, redirect_uri, scopes, expires_at, used_at
+       FROM oauth_authorization_codes WHERE code_hash = ?`,
+      [codeHash]
+    );
+    if (!record || record.integration_id !== client.id || record.used_at) {
+      throw new HttpError(400, '授权码无效或已使用');
+    }
+    if (new Date(record.expires_at).getTime() <= Date.now()) {
+      throw new HttpError(400, '授权码已过期，请重新授权');
+    }
+    const update = await tx.run(
+      'UPDATE oauth_authorization_codes SET used_at = datetime(\'now\') WHERE id = ? AND used_at IS NULL',
+      [record.id]
+    );
+    if (update.changes !== 1) throw new HttpError(400, '授权码无效或已使用');
+    return record;
+  });
+
+  if (body.redirect_uri && body.redirect_uri !== codeRecord.redirect_uri) {
+    throw new HttpError(400, 'redirect_uri 与授权时不一致');
+  }
+
+  const integrationScopes = parseScopesForRoute(client.scopes);
+  const scopes = parseScopesForRoute(codeRecord.scopes).filter((scope) => integrationScopes.includes(scope));
+  const user = await get(
+    `SELECT u.id, i.provider_subject AS email
+     FROM users u
+     JOIN user_identities i ON i.user_id = u.id AND i.provider = 'email'
+     WHERE u.id = ?`,
+    [codeRecord.user_id]
+  );
+  if (!user) throw new HttpError(400, '授权用户不存在');
+
+  const accessToken = signOAuthAccessToken({ userId: user.id, integrationId: client.id, scope: scopes });
+  addLog({ userId: user.id, action: 'oauth_token', targetType: 'integration', targetId: client.id }, req);
+
+  return res.json({
+    access_token: accessToken,
+    token_type: 'Bearer',
+    expires_in: 3600,
+    scope: scopes.join(' '),
+    user: { id: user.id, email: user.email },
+  });
+}));
+
+app.get('/api/v1/oauth/userinfo', oauthAccessRequired(['user:read']), asyncRoute(async (req, res) => {
+  const user = await get(
+    `SELECT u.id, i.provider_subject AS email
+     FROM users u
+     JOIN user_identities i ON i.user_id = u.id AND i.provider = 'email'
+     WHERE u.id = ?`,
+    [req.oauthAuth.userId]
+  );
+  if (!user) throw new HttpError(404, '用户不存在');
+  const [localPart] = String(user.email).split('@');
+  return res.json({ id: user.id, email: user.email, name: localPart });
+}));
 
 app.get('/healthz', asyncRoute(async (_req, res) => {
   await get('SELECT 1 AS ok');

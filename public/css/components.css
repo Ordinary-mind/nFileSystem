@@ -58,6 +58,9 @@
   font-size: 16px;
 }
 .text-field:focus { border-color: var(--primary); outline: 3px solid rgba(54, 89, 217, 0.12); }
+textarea.text-field { height: auto; min-height: 88px; padding: 12px 14px; line-height: 1.6; resize: vertical; font-size: 14px; }
+.field-hint { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.field-hint code { word-break: break-all; font-size: 12px; }
 .field-label { display: block; margin: 0 0 7px; font-size: 13px; font-weight: 600; color: #344054; }
 .field-group + .field-group { margin-top: 14px; }
 

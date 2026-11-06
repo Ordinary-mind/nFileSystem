@@ -121,7 +121,7 @@ after(async () => {
 
 test('数据库使用 SHA-256 基线结构', async () => {
   const version = await dbModule.get('PRAGMA user_version');
-  assert.equal(version.user_version, 5);
+  assert.equal(version.user_version, 6);
   const columns = await dbModule.all('PRAGMA table_info(files)');
   assert.deepEqual(columns.map((column) => column.name), ['id', 'sha256', 'size', 'mime_type', 'created_at', 'unreferenced_at']);
   await assert.rejects(

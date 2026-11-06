@@ -17,6 +17,29 @@ function navigate(path, replace = false) {
   else window.location.hash = hash;
 }
 
+/**
+ * 从应用授权页跳来登录时，登录成功后回到原来的授权地址。
+ * 只允许同源的 /oauth/authorize，避免被构造成开放重定向。
+ */
+function resumeOAuthReturn() {
+  let target = '';
+  try {
+    target = sessionStorage.getItem('oauth_return') || '';
+    sessionStorage.removeItem('oauth_return');
+  } catch {
+    return false;
+  }
+  if (!target) return false;
+  try {
+    const url = new URL(target);
+    if (url.origin !== window.location.origin || url.pathname !== '/oauth/authorize') return false;
+    window.location.replace(url.toString());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function startApp() {
   const app = document.getElementById('app');
 
@@ -83,6 +106,7 @@ export function startApp() {
       mountAuth(app, (token, email) => {
         saveSession(token, email);
         showToast(`欢迎回来，${email}`);
+        if (resumeOAuthReturn()) return;
         navigate('files', true);
         render();
       });

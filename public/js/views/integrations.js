@@ -3,7 +3,7 @@ import { icon } from '../core/icons.js';
 import { escapeHtml, parseScopes, scopeLabel } from '../core/utils.js';
 import { confirmDialog, copyText, errorView, loadingView, openOverlay, showToast } from '../core/ui.js';
 
-const ALL_SCOPES = ['files:upload', 'files:read', 'files:delete', 'links:create'];
+const ALL_SCOPES = ['files:upload', 'files:read', 'files:delete', 'links:create', 'user:read'];
 
 function scopeOptions(selected) {
   const active = new Set(parseScopes(selected));
@@ -28,6 +28,30 @@ function showTokenOnce(value) {
   panel.overlay.querySelector('[data-copy]').addEventListener('click', async () => {
     try { await copyText(value); showToast('Token 已复制'); }
     catch { showToast('复制失败，请手动选择', 'error'); }
+  });
+}
+
+function showOAuthCredentials(oauth, apiToken = '') {
+  const panel = openOverlay({
+    title: '授权登录凭证',
+    content: `
+      <div class="token-notice">
+        <p>client_secret 只显示一次，请立即填入外部系统配置</p>
+        <div class="field-group"><span class="field-label">client_id</span><code>${escapeHtml(oauth.clientId)}</code></div>
+        <div class="field-group"><span class="field-label">client_secret</span><code>${escapeHtml(oauth.clientSecret)}</code></div>
+        ${apiToken ? `<div class="field-group"><span class="field-label">API Token（上传文件用）</span><code>${escapeHtml(apiToken)}</code></div>` : ''}
+        <button type="button" class="secondary-button" data-copy-oauth>${icon('copy')}<span>复制凭证</span></button>
+      </div>`,
+  });
+  panel.overlay.querySelector('[data-copy-oauth]').addEventListener('click', async () => {
+    try {
+      const lines = [`NFS_CLIENT_ID=${oauth.clientId}`, `NFS_CLIENT_SECRET=${oauth.clientSecret}`];
+      if (apiToken) lines.push(`NFS_FILE_TOKEN=${apiToken}`);
+      await copyText(lines.join('\n'));
+      showToast('凭证已复制');
+    } catch {
+      showToast('复制失败，请手动选择', 'error');
+    }
   });
 }
 
@@ -76,17 +100,27 @@ export function mountIntegrations(root, integrationId, navigate) {
         <form class="dialog-form" data-form>
           <div class="field-group"><label class="field-label">应用名称</label><input class="text-field" name="name" placeholder="例如 music-app" required></div>
           <div class="field-group"><label class="field-label">根目录名称</label><input class="text-field" name="rootFolderName" placeholder="默认与应用名称相同"></div>
+          <div class="field-group">
+            <label class="field-label">授权回跳地址（可选）</label>
+            <textarea class="text-field" name="redirectUris" rows="3" placeholder="https://blog.example.com/api/auth/oauth/callback"></textarea>
+            <p class="field-hint">每行一个，应用授权登录时按原样精确匹配。需同时勾选「读取账号身份」权限。</p>
+          </div>
           <fieldset class="scope-field"><legend>应用权限</legend>${scopeOptions(['files:upload', 'files:read', 'links:create'])}</fieldset>
         </form>`,
       submitLabel: '创建应用',
       onSubmit: async ({ overlay, close }) => {
         const form = overlay.querySelector('[data-form]');
         const scopes = Array.from(form.querySelectorAll('[name="scopes"]:checked')).map((input) => input.value);
+        const redirectUris = form.redirectUris.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
         if (!form.name.value.trim() || !scopes.length) { showToast('请填写名称并选择权限', 'error'); return; }
         try {
-          const data = await request('/integrations', { method: 'POST', body: { name: form.name.value.trim(), rootFolderName: form.rootFolderName.value.trim(), scopes, createToken: true } });
+          const data = await request('/integrations', { method: 'POST', body: { name: form.name.value.trim(), rootFolderName: form.rootFolderName.value.trim(), scopes, redirectUris, createToken: true } });
           close();
-          if (data.token && data.token.token) showTokenOnce(data.token.token);
+          if (data.oauth && data.oauth.clientSecret) {
+            showOAuthCredentials(data.oauth, data.token && data.token.token ? data.token.token : '');
+          } else if (data.token && data.token.token) {
+            showTokenOnce(data.token.token);
+          }
           showToast('应用创建成功');
           loadList();
         } catch (error) { showToast(error.message, 'error'); }
@@ -110,6 +144,7 @@ export function mountIntegrations(root, integrationId, navigate) {
   }
 
   function renderDetail() {
+    const redirectUris = Array.isArray(activeIntegration.redirectUris) ? activeIntegration.redirectUris : [];
     content.innerHTML = `
       <section class="integration-detail-head">
         <div class="detail-icon">${icon('apps')}</div>
@@ -117,6 +152,14 @@ export function mountIntegrations(root, integrationId, navigate) {
         <span class="status-badge ${activeIntegration.enabled === 1 ? 'enabled' : 'disabled'}">${activeIntegration.enabled === 1 ? '已启用' : '已停用'}</span>
       </section>
       <div class="chip-row detail-scopes">${scopeChips(activeIntegration.scopes)}</div>
+      <section class="integration-oauth">
+        <div class="section-heading"><h2>授权登录</h2><button type="button" class="text-button" data-reset-client>重置凭证</button></div>
+        <ul class="integration-oauth-list">
+          <li>client_id：<code>${escapeHtml(activeIntegration.clientId || '未生成')}</code></li>
+          <li>回跳地址：${redirectUris.length ? redirectUris.map((uri) => `<code>${escapeHtml(uri)}</code>`).join('<br>') : '未配置'}</li>
+        </ul>
+        <p class="field-hint">外部应用使用 client_id + client_secret 走授权码模式登录，secret 仅在创建或重置时显示一次。</p>
+      </section>
       <div class="section-heading"><h2>API Token</h2><span>${tokens.length} 个</span></div>
       <div class="token-list">${tokens.length ? tokens.map((token) => `
         <article class="token-card" data-token-id="${token.id}" data-name="${escapeHtml(token.name || '')}" data-scopes="${escapeHtml(token.scopes || '')}">
@@ -129,6 +172,24 @@ export function mountIntegrations(root, integrationId, navigate) {
       const token = tokens.find((item) => String(item.id) === card.dataset.tokenId);
       openTokenForm(token);
     }));
+    content.querySelector('[data-reset-client]').addEventListener('click', resetClientCredentials);
+  }
+
+  async function resetClientCredentials() {
+    const accepted = await confirmDialog({
+      title: '重置授权凭证',
+      message: '旧的 client_id 与 client_secret 会立即失效，使用该应用登录的外部系统需要重新配置。',
+      confirmLabel: '重置',
+      danger: true,
+    });
+    if (!accepted) return;
+    try {
+      const data = await request(`/integrations/${integrationId}/client`, { method: 'POST' });
+      showOAuthCredentials(data.oauth);
+      loadDetail();
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
   }
 
   function openTokenForm(token = null) {

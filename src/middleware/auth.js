@@ -1,4 +1,4 @@
-const { verifyToken, verifyDownloadToken } = require('../utils/security');
+const { verifyToken, verifyDownloadToken, verifyOAuthAccessToken } = require('../utils/security');
 const { get, run } = require('../db');
 const crypto = require('crypto');
 
@@ -112,6 +112,53 @@ function apiTokenRequired(requiredScopes = []) {
   };
 }
 
+/**
+ * 接入应用授权登录签发的 access token 鉴权。
+ * token 中的 scope 仍需与应用当前 scopes 求交集，应用被停用或收窄权限后立即生效。
+ */
+function oauthAccessRequired(requiredScopes = []) {
+  return async (req, res, next) => {
+    try {
+      const authHeader = req.headers.authorization || '';
+      const [type, token] = authHeader.split(' ');
+      if (type !== 'Bearer' || !token) {
+        return res.status(401).json({ message: '访问令牌缺失' });
+      }
+
+      const payload = verifyOAuthAccessToken(token);
+      if (!Number.isSafeInteger(payload.userId) || !Number.isSafeInteger(payload.integrationId)) {
+        return res.status(401).json({ message: '访问令牌无效或已过期' });
+      }
+
+      const record = await get(
+        `SELECT i.id, i.scopes AS integration_scopes, i.enabled, i.user_id
+         FROM integrations i
+         WHERE i.id = ? AND i.user_id = ?`,
+        [payload.integrationId, payload.userId]
+      );
+      if (!record || record.enabled !== 1) {
+        return res.status(401).json({ message: '接入应用不可用' });
+      }
+
+      const integrationScopes = parseScopes(record.integration_scopes);
+      const grantedScopes = parseScopes(payload.scope).filter((scope) => integrationScopes.includes(scope));
+      if (!hasRequiredScopes(grantedScopes, requiredScopes)) {
+        return res.status(403).json({ message: '访问令牌权限不足' });
+      }
+
+      req.oauthAuth = {
+        userId: record.user_id,
+        integrationId: record.id,
+        scopes: grantedScopes,
+      };
+      req.user = { id: record.user_id };
+      return next();
+    } catch {
+      return res.status(401).json({ message: '访问令牌无效或已过期' });
+    }
+  };
+}
+
 async function downloadAuthRequired(req, res, next) {
   if (req.headers.authorization) return authRequired(req, res, next);
   try {
@@ -135,6 +182,7 @@ async function downloadAuthRequired(req, res, next) {
 module.exports = {
   authRequired,
   apiTokenRequired,
+  oauthAccessRequired,
   downloadAuthRequired,
   hashApiToken,
 };
